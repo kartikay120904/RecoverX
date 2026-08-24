@@ -17,6 +17,14 @@ class PaymentMethod(str, Enum):
     NETBANKING = "netbanking"
     WALLET = "wallet"
 
+class PaymentFailureCode(str, Enum):
+    INSUFFICIENT_FUNDS = "insufficient_funds"
+    BANK_TIMEOUT = "bank_timeout"
+    NETWORK_ERROR = "network_error"
+    PAYMENT_DECLINED = "payment_declined"
+    AUTHENTICATION_FAILED = "authentication_failed"
+    GATEWAY_TIMEOUT = "gateway_timeout"
+
 
 class OrderStatus(str, Enum):
     CREATED = "created"
