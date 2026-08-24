@@ -1,12 +1,17 @@
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+from backend.app.domain.events import DomainEvent
 from backend.app.domain.models import (
     Customer,
     Merchant,
     Order,
     Payment,
+    RecoveryAttempt,
 )
-from backend.app.domain.events import DomainEvent
+
+if TYPE_CHECKING:
+    from simulator.analytics.report import SimulationReport
 
 
 @dataclass(frozen=True)
@@ -16,3 +21,5 @@ class SimulationResult:
     orders: list[Order]
     payments: list[Payment]
     events: list[DomainEvent]
+    recovery_attempts: list[RecoveryAttempt]
+    report: "SimulationReport | None" = None
