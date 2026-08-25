@@ -96,9 +96,7 @@ function App() {
         <div className="error-card">
           <h2>Backend connection failed</h2>
           <p>{error}</p>
-
           <button onClick={loadDashboard}>Retry</button>
-
           <small>
             Make sure FastAPI is running on port 8000.
           </small>
@@ -117,10 +115,41 @@ function App() {
     success: Number((rate * 100).toFixed(2)),
   }));
 
+  const failureCodeData = Object.entries(
+    report.failure_code_distribution
+  )
+    .map(([code, count]) => ({
+      code: formatLabel(code),
+      count,
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  const segmentData = Object.entries(
+    report.failure_rate_by_customer_segment
+  )
+    .map(([segment, rate]) => ({
+      segment: formatLabel(segment),
+      failure: Number((rate * 100).toFixed(2)),
+    }))
+    .sort((a, b) => b.failure - a.failure);
+
+  const merchantData = Object.entries(
+    report.failure_rate_by_merchant
+  )
+    .map(([merchant, rate]) => ({
+      merchant,
+      failure: Number((rate * 100).toFixed(2)),
+    }))
+    .sort((a, b) => b.failure - a.failure)
+    .slice(0, 8);
+
   const recoveryRevenue = report.recovery_recommendations.reduce(
     (sum, item) => sum + Number(item.predicted_revenue || 0),
     0
   );
+
+  const highestRiskSegment = segmentData[0];
+  const highestFailureCode = failureCodeData[0];
 
   return (
     <div className="app">
@@ -182,10 +211,10 @@ function App() {
 
           <MetricCard
             label="Failed Volume"
-            value={`₹${Number(
+            value={`&#8377;${Number(
               metrics.failed_volume
             ).toLocaleString()}`}
-            detail={`of ₹${Number(
+            detail={`of &#8377;${Number(
               metrics.total_volume
             ).toLocaleString()} total volume`}
             danger
@@ -193,7 +222,7 @@ function App() {
 
           <MetricCard
             label="Recovery Opportunity"
-            value={`₹${recoveryRevenue.toLocaleString(undefined, {
+            value={`&#8377;${recoveryRevenue.toLocaleString(undefined, {
               maximumFractionDigits: 0,
             })}`}
             detail={`${report.recovery_recommendations.length} recommendations`}
@@ -205,7 +234,6 @@ function App() {
             <div className="panel-header">
               <div>
                 <h2>Payment Performance</h2>
-
                 <span>
                   Success rate by payment method
                 </span>
@@ -213,19 +241,12 @@ function App() {
             </div>
 
             <div className="chart">
-              <ResponsiveContainer
-                width="100%"
-                height={300}
-              >
+              <ResponsiveContainer width="100%" height={300}>
                 <BarChart data={methodData}>
                   <CartesianGrid strokeDasharray="3 3" />
-
                   <XAxis dataKey="method" />
-
                   <YAxis domain={[0, 100]} />
-
                   <Tooltip />
-
                   <Bar
                     dataKey="success"
                     name="Success %"
@@ -253,7 +274,7 @@ function App() {
               }`}
             >
               <div className="incident-icon">
-                {incident.detected ? "!" : "✓"}
+                {incident.detected ? "!" : "\u2713"}
               </div>
 
               <div>
@@ -330,19 +351,214 @@ function App() {
 
               <ComparisonCard
                 label="Failed Volume"
-                baseline={`₹${Number(
+                baseline={`&#8377;${Number(
                   comparison.baseline.failed_volume
                 ).toLocaleString()}`}
-                incident={`₹${Number(
+                incident={`&#8377;${Number(
                   comparison.incident.failed_volume
                 ).toLocaleString()}`}
-                delta={`+₹${Number(
+                delta={`+&#8377;${Number(
                   comparison.impact.failed_volume_delta
                 ).toLocaleString()}`}
               />
             </div>
           </section>
         )}
+
+        {/* FAILURE ANALYSIS */}
+
+        <section className="analysis-grid">
+          <div className="panel">
+            <div className="panel-header">
+              <div>
+                <h2>Failure Code Distribution</h2>
+                <span>
+                  Root causes behind failed payments
+                </span>
+              </div>
+            </div>
+
+            <div className="chart">
+              <ResponsiveContainer width="100%" height={320}>
+                <BarChart
+                  data={failureCodeData}
+                  layout="vertical"
+                  margin={{
+                    left: 20,
+                    right: 20,
+                  }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" />
+
+                  <XAxis type="number" />
+
+                  <YAxis
+                    type="category"
+                    dataKey="code"
+                    width={125}
+                  />
+
+                  <Tooltip />
+
+                  <Bar
+                    dataKey="count"
+                    name="Failed Payments"
+                    radius={[0, 6, 6, 0]}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="panel">
+            <div className="panel-header">
+              <div>
+                <h2>Customer Segment Risk</h2>
+                <span>
+                  Failure rate across customer segments
+                </span>
+              </div>
+            </div>
+
+            <div className="chart">
+              <ResponsiveContainer width="100%" height={320}>
+                <BarChart data={segmentData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+
+                  <XAxis dataKey="segment" />
+
+                  <YAxis
+                    domain={[0, "auto"]}
+                    tickFormatter={(value) => `${value}%`}
+                  />
+
+                  <Tooltip
+                    formatter={(value) => [
+                      `${value}%`,
+                      "Failure Rate",
+                    ]}
+                  />
+
+                  <Bar
+                    dataKey="failure"
+                    name="Failure Rate"
+                    radius={[6, 6, 0, 0]}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </section>
+
+        <section className="panel merchant-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Highest-Risk Merchants</h2>
+
+              <span>
+                Merchants ranked by payment failure rate
+              </span>
+            </div>
+
+            <span className="count-badge">
+              Top {merchantData.length}
+            </span>
+          </div>
+
+          <div className="merchant-table">
+            <div className="merchant-row merchant-header">
+              <span>Rank</span>
+              <span>Merchant ID</span>
+              <span>Failure Rate</span>
+              <span>Risk</span>
+            </div>
+
+            {merchantData.map((merchant, index) => (
+              <div
+                className="merchant-row"
+                key={merchant.merchant}
+              >
+                <span className="merchant-rank">
+                  #{index + 1}
+                </span>
+
+                <span className="merchant-id">
+                  {merchant.merchant}
+                </span>
+
+                <strong className="merchant-rate">
+                  {merchant.failure}%
+                </strong>
+
+                <span
+                  className={`risk-badge ${
+                    merchant.failure >= 15
+                      ? "high"
+                      : merchant.failure >= 13
+                      ? "medium"
+                      : "low"
+                  }`}
+                >
+                  {merchant.failure >= 15
+                    ? "High"
+                    : merchant.failure >= 13
+                    ? "Medium"
+                    : "Low"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="risk-summary">
+          <div className="risk-summary-card">
+            <span className="eyebrow">
+              PRIMARY FAILURE DRIVER
+            </span>
+
+            <strong>
+              {highestFailureCode?.code || "N/A"}
+            </strong>
+
+            <p>
+              {highestFailureCode
+                ? `${highestFailureCode.count.toLocaleString()} failed payments`
+                : "No failure data available"}
+            </p>
+          </div>
+
+          <div className="risk-summary-card">
+            <span className="eyebrow">
+              HIGHEST-RISK CUSTOMER SEGMENT
+            </span>
+
+            <strong>
+              {highestRiskSegment?.segment || "N/A"}
+            </strong>
+
+            <p>
+              {highestRiskSegment
+                ? `${highestRiskSegment.failure}% failure rate`
+                : "No segment data available"}
+            </p>
+          </div>
+
+          <div className="risk-summary-card">
+            <span className="eyebrow">
+              AFFECTED PAYMENT VOLUME
+            </span>
+
+            <strong>
+              &#8377;{Number(
+                incident.affected_volume
+              ).toLocaleString()}
+            </strong>
+
+            <p>
+              Across {incident.affected_payments.toLocaleString()} affected payments
+            </p>
+          </div>
+        </section>
 
         <section className="panel">
           <div className="panel-header">
@@ -390,7 +606,7 @@ function App() {
                     </strong>
 
                     <span>
-                      ₹
+                      &#8377;
                       {Number(
                         recommendation.predicted_revenue
                       ).toLocaleString()}
@@ -403,6 +619,12 @@ function App() {
       </main>
     </div>
   );
+}
+
+function formatLabel(value) {
+  return value
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function MetricCard({
@@ -418,9 +640,7 @@ function MetricCard({
       }`}
     >
       <span>{label}</span>
-
       <strong>{value}</strong>
-
       <small>{detail}</small>
     </div>
   );
