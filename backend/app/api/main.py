@@ -240,6 +240,9 @@ def analytics_report_api(
                 "predicted_revenue": str(
                     recommendation.predicted_revenue
                 ),
+                "decision_score": (
+            recommendation.predicted_probability
+        ),
                 "reason": recommendation.reason,
             }
             for recommendation in recommendations

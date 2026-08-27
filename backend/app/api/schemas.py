@@ -55,6 +55,7 @@ class RecoveryRecommendationResponse(BaseModel):
     strategy: RecoveryStrategy
     predicted_probability: float
     predicted_revenue: Decimal
+    decision_score: float
     reason: str
 
 
