@@ -13,6 +13,14 @@ from simulator.analytics.payment_metrics import (
     failure_rate_by_merchant,
     failure_rate_by_customer_segment,
 )
+from uuid import UUID
+
+from fastapi import HTTPException
+
+from backend.app.domain.models import Payment
+from simulator.analytics.counterfactual import (
+    simulate_counterfactuals,
+)
 from simulator.analytics.anomaly_detection import detect_anomalies
 from simulator.analytics.incident_analysis import analyze_incident
 from simulator.analytics.recovery_recommendation import (
@@ -25,6 +33,10 @@ from backend.app.api.schemas import (
 )
 
 from backend.app.api.recovery import router as recovery_router
+from simulator.analytics.adaptive_recovery import (
+    rank_adaptive_recoveries,
+    decision_to_dict,
+)
 
 app = FastAPI(
     title="RecoverX API",
@@ -287,5 +299,140 @@ def run_recovery_api(
                 "status": attempt.status.value,
             }
             for attempt in result.recovery_attempts
+        ],
+    }
+
+@app.post("/analytics/adaptive-recovery")
+def adaptive_recovery_api(
+    config: SimulationRunConfig | None = None,
+    failure_rate_threshold: float = 0.10,
+    failure_code_threshold: float = 0.40,
+):
+    result = run_simulation(config)
+
+    incident = analyze_incident(
+        result.payments,
+        result.orders,
+        failure_rate_threshold=failure_rate_threshold,
+        failure_code_threshold=failure_code_threshold,
+    )
+
+    decisions = rank_adaptive_recoveries(
+        result.payments,
+        incident,
+    )
+
+    total_predicted_revenue = sum(
+        (
+            decision.predicted_revenue
+            for decision in decisions
+        ),
+        Decimal("0"),
+    )
+
+    high_priority = [
+        decision
+        for decision in decisions
+        if decision.priority_score >= 70
+    ]
+
+    return {
+        "summary": {
+            "total_opportunities": len(decisions),
+            "high_priority_opportunities": len(high_priority),
+            "predicted_recoverable_revenue": str(
+                total_predicted_revenue
+            ),
+            "incident_severity": incident.severity,
+        },
+        "opportunities": [
+            decision_to_dict(decision)
+            for decision in decisions
+        ],
+    }
+
+@app.post("/analytics/counterfactual/{payment_id}")
+def counterfactual_recovery_api(
+    payment_id: UUID,
+):
+    result = run_simulation(
+        SimulationRunConfig(
+            seed=42,
+            merchant_count=20,
+            customers_per_merchant=100,
+            orders_per_customer=5,
+        )
+    )
+
+    payment = next(
+        (
+            payment
+            for payment in result.payments
+            if payment.payment_id == payment_id
+        ),
+        None,
+    )
+
+    if payment is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Payment not found",
+        )
+
+    if payment.failure_code is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Counterfactual analysis requires a failed payment",
+        )
+
+    incident = analyze_incident(
+        result.payments,
+        result.orders,
+        failure_rate_threshold=0.10,
+        failure_code_threshold=0.40,
+    )
+
+    options = simulate_counterfactuals(
+        payment,
+        incident,
+    )
+
+    recommended = next(
+        option
+        for option in options
+        if option.recommended
+    )
+
+    return {
+        "payment": {
+            "payment_id": str(payment.payment_id),
+            "amount": str(payment.amount),
+            "currency": payment.currency,
+            "method": payment.method.value,
+            "failure_code": payment.failure_code,
+        },
+        "recommendation": {
+            "strategy": recommended.strategy.value,
+            "probability": recommended.probability,
+            "expected_revenue": str(
+                recommended.expected_revenue
+            ),
+            "explanation": recommended.explanation,
+        },
+        "options": [
+            {
+                "strategy": option.strategy.value,
+                "probability": option.probability,
+                "expected_revenue": str(
+                    option.expected_revenue
+                ),
+                "revenue_uplift": str(
+                    option.revenue_uplift
+                ),
+                "relative_uplift": option.relative_uplift,
+                "recommended": option.recommended,
+                "explanation": option.explanation,
+            }
+            for option in options
         ],
     }
