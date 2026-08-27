@@ -1,69 +1,48 @@
-from simulator.recovery.engine import RecoveryEngine
-from simulator.runner import run_simulation
-from simulator.simulation_config import SimulationRunConfig
+from decimal import Decimal
+from uuid import uuid4
 
 from backend.app.domain.enums import (
     PaymentFailureCode,
+    PaymentMethod,
     PaymentStatus,
     RecoveryStatus,
     RecoveryStrategy,
 )
+from backend.app.domain.models import Payment
+from simulator.recovery.engine import RecoveryEngine
 
 
-def create_failed_payment():
-    result = run_simulation(
-        SimulationRunConfig(
-            seed=42,
-            merchant_count=4,
-            customers_per_merchant=10,
-            orders_per_customer=5,
-        )
+def make_failed_payment(failure_code: str) -> Payment:
+    return Payment(
+        payment_id=uuid4(),
+        order_id=uuid4(),
+        customer_id=uuid4(),
+        amount=Decimal("1000"),
+        currency="INR",
+        method=PaymentMethod.UPI,
+        status=PaymentStatus.FAILED,
+        failure_code=failure_code,
     )
 
-    return next(
-        payment
-        for payment in result.payments
-        if payment.status == PaymentStatus.FAILED
+
+def test_bank_timeout_recommends_retry():
+    payment = make_failed_payment(
+        PaymentFailureCode.BANK_TIMEOUT.value
     )
 
-
-def test_recovery_engine_proposes_for_failed_payment():
-    payment = create_failed_payment()
-
-    engine = RecoveryEngine()
-    attempt = engine.propose(payment)
+    attempt = RecoveryEngine().propose(payment)
 
     assert attempt is not None
-    assert attempt.payment_id == payment.payment_id
+    assert attempt.strategy == RecoveryStrategy.RETRY_PAYMENT
+    assert attempt.predicted_probability == 0.70
+    assert attempt.predicted_revenue == Decimal("700.0")
     assert attempt.status == RecoveryStatus.PROPOSED
-    assert 0 <= attempt.predicted_probability <= 1
-    assert attempt.predicted_revenue >= 0
 
 
-def test_recovery_engine_ignores_successful_payment():
-    result = run_simulation(
-        SimulationRunConfig(
-            seed=42,
-            merchant_count=4,
-            customers_per_merchant=10,
-            orders_per_customer=5,
-        )
+def test_network_error_recommends_retry():
+    payment = make_failed_payment(
+        PaymentFailureCode.NETWORK_ERROR.value
     )
-
-    payment = next(
-        payment
-        for payment in result.payments
-        if payment.status == PaymentStatus.CAPTURED
-    )
-
-    engine = RecoveryEngine()
-
-    assert engine.propose(payment) is None
-
-
-def test_timeout_uses_retry_strategy():
-    payment = create_failed_payment()
-    payment.failure_code = PaymentFailureCode.BANK_TIMEOUT.value
 
     attempt = RecoveryEngine().propose(payment)
 
@@ -71,21 +50,59 @@ def test_timeout_uses_retry_strategy():
     assert attempt.strategy == RecoveryStrategy.RETRY_PAYMENT
 
 
-def test_insufficient_funds_uses_reminder():
-    payment = create_failed_payment()
-    payment.failure_code = PaymentFailureCode.INSUFFICIENT_FUNDS.value
+def test_gateway_timeout_recommends_retry():
+    payment = make_failed_payment(
+        PaymentFailureCode.GATEWAY_TIMEOUT.value
+    )
+
+    attempt = RecoveryEngine().propose(payment)
+
+    assert attempt is not None
+    assert attempt.strategy == RecoveryStrategy.RETRY_PAYMENT
+
+
+def test_insufficient_funds_recommends_reminder():
+    payment = make_failed_payment(
+        PaymentFailureCode.INSUFFICIENT_FUNDS.value
+    )
 
     attempt = RecoveryEngine().propose(payment)
 
     assert attempt is not None
     assert attempt.strategy == RecoveryStrategy.SEND_REMINDER
+    assert attempt.predicted_probability == 0.45
+    assert attempt.predicted_revenue == Decimal("450.00")
 
 
-def test_authentication_failure_uses_recovery_link():
-    payment = create_failed_payment()
-    payment.failure_code = PaymentFailureCode.AUTHENTICATION_FAILED.value
+def test_authentication_failure_recommends_recovery_link():
+    payment = make_failed_payment(
+        PaymentFailureCode.AUTHENTICATION_FAILED.value
+    )
 
     attempt = RecoveryEngine().propose(payment)
 
     assert attempt is not None
     assert attempt.strategy == RecoveryStrategy.RECOVERY_LINK
+
+
+def test_payment_declined_recommends_recovery_link():
+    payment = make_failed_payment(
+        PaymentFailureCode.PAYMENT_DECLINED.value
+    )
+
+    attempt = RecoveryEngine().propose(payment)
+
+    assert attempt is not None
+    assert attempt.strategy == RecoveryStrategy.RECOVERY_LINK
+
+
+def test_successful_payment_is_not_recoverable():
+    payment = make_failed_payment(
+        PaymentFailureCode.BANK_TIMEOUT.value
+    )
+
+    payment.status = PaymentStatus.CAPTURED
+
+    attempt = RecoveryEngine().propose(payment)
+
+    assert attempt is None

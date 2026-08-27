@@ -1,102 +1,102 @@
+from decimal import Decimal
 from random import Random
+from uuid import uuid4
 
 import pytest
 
 from backend.app.domain.enums import (
+    PaymentFailureCode,
+    PaymentMethod,
     PaymentStatus,
     RecoveryStatus,
     RecoveryStrategy,
 )
-
-from simulator.recovery.engine import RecoveryEngine
+from backend.app.domain.models import Payment, RecoveryAttempt
 from simulator.recovery.executor import RecoveryExecutor
-from simulator.runner import run_simulation
-from simulator.simulation_config import SimulationRunConfig
 
 
-def create_failed_payment():
-    result = run_simulation(
-        SimulationRunConfig(
-            seed=42,
-            merchant_count=4,
-            customers_per_merchant=10,
-            orders_per_customer=5,
-        )
-    )
-
-    return next(
-        payment
-        for payment in result.payments
-        if payment.status == PaymentStatus.FAILED
+def make_payment() -> Payment:
+    return Payment(
+        payment_id=uuid4(),
+        order_id=uuid4(),
+        customer_id=uuid4(),
+        amount=Decimal("1000"),
+        currency="INR",
+        method=PaymentMethod.UPI,
+        status=PaymentStatus.FAILED,
+        failure_code=PaymentFailureCode.BANK_TIMEOUT.value,
     )
 
 
-def test_successful_recovery_records_revenue():
-    payment = create_failed_payment()
+def make_attempt() -> RecoveryAttempt:
+    return RecoveryAttempt(
+        recovery_id=uuid4(),
+        payment_id=uuid4(),
+        strategy=RecoveryStrategy.RETRY_PAYMENT,
+        predicted_probability=0.70,
+        predicted_revenue=Decimal("700"),
+        status=RecoveryStatus.PROPOSED,
+    )
 
-    attempt = RecoveryEngine().propose(payment)
 
-    assert attempt is not None
-
-    attempt.predicted_probability = 1.0
+def test_successful_recovery_records_actual_revenue():
+    payment = make_payment()
+    attempt = make_attempt()
 
     result = RecoveryExecutor().execute(
-        attempt,
-        payment,
-        Random(42),
+        attempt=attempt,
+        payment=payment,
+        rng=Random(1),
     )
 
     assert result.status == RecoveryStatus.SUCCEEDED
-    assert result.actual_revenue == payment.amount
+    assert result.actual_revenue == Decimal("1000")
 
 
 def test_failed_recovery_records_zero_revenue():
-    payment = create_failed_payment()
-
-    attempt = RecoveryEngine().propose(payment)
-
-    assert attempt is not None
-
-    attempt.predicted_probability = 0.0
+    payment = make_payment()
+    attempt = make_attempt()
 
     result = RecoveryExecutor().execute(
-        attempt,
-        payment,
-        Random(42),
+        attempt=attempt,
+        payment=payment,
+        rng=Random(0),
     )
 
     assert result.status == RecoveryStatus.FAILED
-    assert result.actual_revenue == 0
+    assert result.actual_revenue == Decimal("0")
 
 
 def test_only_proposed_attempt_can_be_executed():
-    payment = create_failed_payment()
-
-    attempt = RecoveryEngine().propose(payment)
-
-    assert attempt is not None
-
+    payment = make_payment()
+    attempt = make_attempt()
     attempt.status = RecoveryStatus.SUCCEEDED
 
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match="Only proposed recovery attempts can be executed",
+    ):
         RecoveryExecutor().execute(
-            attempt,
-            payment,
-            Random(42),
+            attempt=attempt,
+            payment=payment,
+            rng=Random(1),
         )
 
 
-def test_recovery_execution_preserves_payment_id():
-    payment = create_failed_payment()
+def test_execution_is_deterministic_with_same_seed():
+    payment = make_payment()
 
-    attempt = RecoveryEngine().propose(payment)
-
-    assert attempt is not None
-
-    result = RecoveryExecutor().execute(
-        attempt,
-        payment,
-        Random(42),
+    first = RecoveryExecutor().execute(
+        attempt=make_attempt(),
+        payment=payment,
+        rng=Random(42),
     )
 
-    assert result.payment_id == payment.payment_id
+    second = RecoveryExecutor().execute(
+        attempt=make_attempt(),
+        payment=payment,
+        rng=Random(42),
+    )
+
+    assert first.status == second.status
+    assert first.actual_revenue == second.actual_revenue

@@ -17,7 +17,10 @@ class RecoveryExecutor:
         rng: Random,
     ) -> RecoveryAttempt:
 
-        if attempt.status != RecoveryStatus.PROPOSED:
+        if attempt.status not in (
+          RecoveryStatus.PROPOSED,
+          RecoveryStatus.APPROVED,
+       ):
             raise ValueError(
                 "Only proposed recovery attempts can be executed."
             )

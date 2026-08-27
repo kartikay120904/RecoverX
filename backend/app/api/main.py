@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from backend.app.domain.enums import RecoveryStatus
+from decimal import Decimal
 
 from simulator.runner import run_simulation
 from simulator.analytics.comparison import compare_simulations
@@ -22,11 +24,14 @@ from backend.app.api.schemas import (
     SimulationResponse,
 )
 
+from backend.app.api.recovery import router as recovery_router
+
 app = FastAPI(
     title="RecoverX API",
     description="Payment failure recovery and analytics platform",
     version="1.0.0",
 )
+app.include_router(recovery_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -226,5 +231,61 @@ def analytics_report_api(
                 "reason": recommendation.reason,
             }
             for recommendation in recommendations
+        ],
+    }
+
+@app.post("/recovery/run")
+def run_recovery_api(
+    config: SimulationRunConfig | None = None,
+):
+    result = run_simulation(config)
+
+    return {
+        "total_attempts": len(result.recovery_attempts),
+        "succeeded": sum(
+            1
+            for attempt in result.recovery_attempts
+            if attempt.status == RecoveryStatus.SUCCEEDED
+        ),
+        "failed": sum(
+            1
+            for attempt in result.recovery_attempts
+            if attempt.status == RecoveryStatus.FAILED
+        ),
+        "predicted_revenue": str(
+            sum(
+                (
+                    attempt.predicted_revenue
+                    for attempt in result.recovery_attempts
+                ),
+                Decimal("0"),
+            )
+        ),
+        "actual_revenue": str(
+            sum(
+                (
+                    attempt.actual_revenue or Decimal("0")
+                    for attempt in result.recovery_attempts
+                ),
+                Decimal("0"),
+            )
+        ),
+        "attempts": [
+            {
+                "recovery_id": str(attempt.recovery_id),
+                "payment_id": str(attempt.payment_id),
+                "strategy": attempt.strategy.value,
+                "predicted_probability": (
+                    attempt.predicted_probability
+                ),
+                "predicted_revenue": str(
+                    attempt.predicted_revenue
+                ),
+                "actual_revenue": str(
+                    attempt.actual_revenue or Decimal("0")
+                ),
+                "status": attempt.status.value,
+            }
+            for attempt in result.recovery_attempts
         ],
     }
