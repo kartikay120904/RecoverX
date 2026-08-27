@@ -439,3 +439,94 @@ def counterfactual_recovery_api(
             for option in options
         ],
     }
+
+@app.post("/recovery/what-if")
+def recovery_what_if_api(
+    failure_code: str,
+    amount: Decimal,
+    method: str = "upi",
+    attempt_number: int = 1,
+):
+    """
+    Simulate the expected recovery outcome for a hypothetical
+    failed payment without modifying stored simulation data.
+    """
+
+    from uuid import uuid4
+
+    from backend.app.domain.enums import (
+        PaymentFailureCode,
+        PaymentMethod,
+        PaymentStatus,
+    )
+    from backend.app.domain.models import Payment
+    from simulator.recovery.engine import RecoveryEngine
+
+    valid_failure_codes = {
+        item.value for item in PaymentFailureCode
+    }
+
+    valid_methods = {
+        item.value: item for item in PaymentMethod
+    }
+
+    if failure_code not in valid_failure_codes:
+        return {
+            "error": f"Unsupported failure_code: {failure_code}",
+            "supported_failure_codes": sorted(valid_failure_codes),
+        }
+
+    if method not in valid_methods:
+        return {
+            "error": f"Unsupported payment method: {method}",
+            "supported_methods": sorted(valid_methods),
+        }
+
+    if amount <= Decimal("0"):
+        return {
+            "error": "amount must be greater than zero"
+        }
+
+    if attempt_number < 1:
+        return {
+            "error": "attempt_number must be at least 1"
+        }
+
+    payment = Payment(
+        payment_id=uuid4(),
+        order_id=uuid4(),
+        customer_id=uuid4(),
+        amount=amount,
+        currency="INR",
+        method=valid_methods[method],
+        status=PaymentStatus.FAILED,
+        failure_code=failure_code,
+        attempt_number=attempt_number,
+    )
+
+    attempt = RecoveryEngine().propose(payment)
+
+    if attempt is None:
+        return {
+            "recoverable": False,
+            "strategy": "no_action",
+            "predicted_probability": 0.0,
+            "predicted_revenue": "0",
+            "decision_score": 0.0,
+            "reason": "Payment is not eligible for automated recovery.",
+        }
+
+    return {
+        "recoverable": True,
+        "strategy": attempt.strategy.value,
+        "predicted_probability": attempt.predicted_probability,
+        "predicted_revenue": str(attempt.predicted_revenue),
+        "decision_score": attempt.decision_score,
+        "reason": attempt.reason,
+        "inputs": {
+            "failure_code": failure_code,
+            "amount": str(amount),
+            "method": method,
+            "attempt_number": attempt_number,
+        },
+    }
