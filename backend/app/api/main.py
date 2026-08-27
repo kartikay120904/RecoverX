@@ -530,3 +530,89 @@ def recovery_what_if_api(
             "attempt_number": attempt_number,
         },
     }
+
+@app.post("/recovery/experiment")
+def recovery_experiment_api(
+    failure_code: str,
+    amount: Decimal,
+    method: str = "upi",
+    attempt_number: int = 1,
+):
+    from uuid import uuid4
+
+    from backend.app.domain.enums import (
+        PaymentFailureCode,
+        PaymentMethod,
+        PaymentStatus,
+    )
+    from backend.app.domain.models import Payment
+    from simulator.recovery.experiments import (
+        compare_recovery_strategies,
+    )
+
+    if failure_code not in {
+        item.value for item in PaymentFailureCode
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid failure_code",
+        )
+
+    if method not in {
+        item.value for item in PaymentMethod
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid payment method",
+        )
+
+    if amount <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="amount must be greater than zero",
+        )
+
+    if attempt_number < 1:
+        raise HTTPException(
+            status_code=400,
+            detail="attempt_number must be at least 1",
+        )
+
+    payment = Payment(
+        payment_id=uuid4(),
+        order_id=uuid4(),
+        customer_id=uuid4(),
+        amount=amount,
+        currency="INR",
+        method=PaymentMethod(method),
+        status=PaymentStatus.FAILED,
+        failure_code=failure_code,
+        attempt_number=attempt_number,
+    )
+
+    results = compare_recovery_strategies(payment)
+
+    return {
+        "payment_amount": str(amount),
+        "failure_code": failure_code,
+        "payment_method": method,
+        "strategies": [
+            {
+                "strategy": result.strategy.value,
+                "probability": result.probability,
+                "expected_revenue": str(result.expected_revenue),
+                "recommendation": result.recommendation,
+            }
+            for result in results
+        ],
+        "best_strategy": (
+            results[0].strategy.value
+            if results
+            else "no_action"
+        ),
+        "best_expected_revenue": (
+            str(results[0].expected_revenue)
+            if results
+            else "0"
+        ),
+    }
