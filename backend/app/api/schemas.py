@@ -68,3 +68,24 @@ class AnalyticsReportResponse(BaseModel):
     anomalies: list[AnomalyResponse]
     incident: IncidentResponse
     recovery_recommendations: list[RecoveryRecommendationResponse]
+
+class AdaptiveDecisionResponse(BaseModel):
+    payment_id: str
+    strategy: RecoveryStrategy
+    confidence: float
+    priority_score: float
+    predicted_probability: float
+    predicted_revenue: Decimal
+    timing: str
+    explanation: str
+    signals: list[str]
+
+
+class CounterfactualOptionResponse(BaseModel):
+    strategy: RecoveryStrategy
+    probability: float
+    expected_revenue: Decimal
+    revenue_uplift: Decimal
+    relative_uplift: float
+    recommended: bool
+    explanation: str

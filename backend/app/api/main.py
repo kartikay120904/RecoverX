@@ -13,6 +13,15 @@ from simulator.analytics.payment_metrics import (
     failure_rate_by_merchant,
     failure_rate_by_customer_segment,
 )
+
+from simulator.analytics.adaptive_recovery import (
+    decision_to_dict,
+    rank_adaptive_recoveries,
+)
+
+from simulator.analytics.counterfactual import (
+    simulate_counterfactuals,
+)
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -302,6 +311,94 @@ def run_recovery_api(
                 "status": attempt.status.value,
             }
             for attempt in result.recovery_attempts
+        ],
+    }
+
+@app.get("/intelligence/decisions")
+def get_adaptive_decisions(
+    config: SimulationRunConfig | None = None,
+):
+    result = run_simulation(config)
+
+    incident = analyze_incident(
+        result.payments,
+        result.orders,
+        failure_rate_threshold=0.10,
+        failure_code_threshold=0.40,
+    )
+
+    decisions = rank_adaptive_recoveries(
+        result.payments,
+        incident,
+    )
+
+    return {
+        "count": len(decisions),
+        "incident": {
+            "detected": incident.detected,
+            "severity": incident.severity,
+        },
+        "decisions": [
+            decision_to_dict(decision)
+            for decision in decisions
+        ],
+    }
+
+
+@app.get("/intelligence/counterfactual/{payment_id}")
+def get_counterfactual_analysis(
+    payment_id: UUID,
+):
+    result = run_simulation(
+        SimulationRunConfig(seed=42)
+    )
+
+    payment = next(
+        (
+            payment
+            for payment in result.payments
+            if payment.payment_id == payment_id
+        ),
+        None,
+    )
+
+    if payment is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Payment not found",
+        )
+
+    incident = analyze_incident(
+        result.payments,
+        result.orders,
+        failure_rate_threshold=0.10,
+        failure_code_threshold=0.40,
+    )
+
+    options = simulate_counterfactuals(
+        payment,
+        incident,
+    )
+
+    return {
+        "payment_id": str(payment_id),
+        "failure_code": payment.failure_code,
+        "amount": str(payment.amount),
+        "options": [
+            {
+                "strategy": option.strategy.value,
+                "probability": option.probability,
+                "expected_revenue": str(
+                    option.expected_revenue
+                ),
+                "revenue_uplift": str(
+                    option.revenue_uplift
+                ),
+                "relative_uplift": option.relative_uplift,
+                "recommended": option.recommended,
+                "explanation": option.explanation,
+            }
+            for option in options
         ],
     }
 
