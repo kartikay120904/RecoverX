@@ -2,16 +2,30 @@ from decimal import Decimal
 from random import Random
 from typing import Any
 from uuid import UUID
+from fastapi import APIRouter, HTTPException, Header
+from pydantic import BaseModel
+from typing import Optional
+from uuid import UUID, uuid4
+from datetime import datetime, timezone
+import hashlib
+import json
 
 from fastapi import APIRouter, HTTPException
 
 from backend.app.domain.enums import (
     RecoveryStatus,
     RecoveryStrategy,
+    PaymentStatus,
 )
 from backend.app.domain.models import (
     Payment,
     RecoveryEvent,
+)
+from simulator.runner import (
+    run_simulation,
+)
+from simulator.simulation_config import (
+    SimulationRunConfig,
 )
 
 from simulator.analytics.counterfactual import (
@@ -40,6 +54,8 @@ router = APIRouter(
 # =========================================================
 
 payments_store: dict[UUID, Payment] = {}
+
+recovery_execution_store: dict[str, dict] = {}
 
 recovery_store: dict[UUID, Any] = {}
 
@@ -71,6 +87,37 @@ executor = RecoveryExecutor()
 
 random_generator = Random(42)
 
+class RecoveryExecutionRequest(BaseModel):
+    payment_id: UUID
+    action: str
+    idempotency_key: str
+
+
+class RecoveryExecutionResponse(BaseModel):
+    execution_id: UUID
+    payment_id: UUID
+    action: str
+    status: str
+    idempotency_key: str
+    created_at: datetime
+def _build_idempotency_fingerprint(
+    payment_id: UUID,
+    action: str,
+) -> str:
+    payload = {
+        "payment_id": str(payment_id),
+        "action": action.lower().strip(),
+    }
+
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    return hashlib.sha256(
+        serialized.encode("utf-8")
+    ).hexdigest()
 # =========================================================
 # Recovery Event Recording Helper
 # =========================================================
@@ -567,41 +614,217 @@ def _store_idempotent_response(
 # Incident helper
 # =========================================================
 
+# =========================================================
+# Incident helper
+# =========================================================
+
 def _build_incident() -> IncidentAnalysis:
     """
-    Build deterministic incident context used by
-    counterfactual analysis.
+    Build deterministic incident context from the currently
+    loaded failed payments.
     """
 
     failed_payments = [
         payment
-        for payment
-        in payments_store.values()
+        for payment in payments_store.values()
         if payment.failure_code is not None
     ]
 
-    affected_volume = sum(
+    total_failures = len(
+        failed_payments
+    )
+
+    revenue_at_risk = sum(
         (
             payment.amount
-            for payment
-            in failed_payments
+            for payment in failed_payments
         ),
         start=Decimal("0"),
     )
 
+    failure_distribution: dict[str, int] = {}
+
+    payment_method_distribution: dict[
+        str,
+        int,
+    ] = {}
+
+    for payment in failed_payments:
+        method = str(payment.method)
+
+        payment_method_distribution[method] = (
+        payment_method_distribution.get(method, 0) + 1
+    )
+
+        failure_code = (
+            str(payment.failure_code)
+            if payment.failure_code is not None
+            else "unknown"
+        )
+
+        failure_distribution[
+            failure_code
+        ] = (
+            failure_distribution.get(
+                failure_code,
+                0,
+            )
+            + 1
+        )
+
+        payment_method = (
+            getattr(
+                payment,
+                "payment_method",
+                None,
+            )
+            or getattr(
+                payment,
+                "method",
+                None,
+            )
+            or getattr(
+                payment,
+                "payment_type",
+                None,
+            )
+            or "unknown"
+        )
+
+        payment_method = str(
+            payment_method
+        )
+
+        payment_method_distribution[
+            payment_method
+        ] = (
+            payment_method_distribution.get(
+                payment_method,
+                0,
+            )
+            + 1
+        )
+
+    top_failure_code = (
+        max(
+            failure_distribution,
+            key=failure_distribution.get,
+        )
+        if failure_distribution
+        else None
+    )
+
+    top_payment_method = (
+        max(
+            payment_method_distribution,
+            key=payment_method_distribution.get,
+        )
+        if payment_method_distribution
+        else None
+    )
+
+    incident_detected = (
+        total_failures >= 3
+    )
+
+    if total_failures == 0:
+
+        severity = "normal"
+
+        incident_type = None
+
+        recommendation = (
+            "No recovery incident detected."
+        )
+
+        reason = (
+            "There are no failed payments "
+            "requiring incident-level intervention."
+        )
+
+    elif total_failures < 3:
+
+        severity = "low"
+
+        incident_type = (
+            "isolated_failures"
+        )
+
+        recommendation = (
+            "Handle failures using "
+            "payment-level recovery strategies."
+        )
+
+        reason = (
+            "The failure count is below the "
+            "incident threshold."
+        )
+
+    elif total_failures < 10:
+
+        severity = "medium"
+
+        incident_type = (
+            "elevated_failure_rate"
+        )
+
+        recommendation = (
+            "Monitor the dominant failure pattern "
+            "and prioritize affected payments."
+        )
+
+        reason = (
+            "Multiple failed payments indicate "
+            "an elevated failure pattern."
+        )
+
+    else:
+
+        severity = "high"
+
+        incident_type = (
+            "payment_failure_incident"
+        )
+
+        recommendation = (
+            "Escalate the incident and investigate "
+            "the dominant failure source."
+        )
+
+        reason = (
+            "A significant number of payment "
+            "failures has been detected."
+        )
+
     return IncidentAnalysis(
-        detected=False,
-        severity="normal",
-        affected_payments=len(
-            failed_payments
+        detected=incident_detected,
+        severity=severity,
+        total_failures=total_failures,
+        failure_distribution=(
+            failure_distribution
         ),
-        affected_volume=affected_volume,
-        affected_methods=[],
-        affected_merchants=[],
-        dominant_failure_codes=[],
-        recommended_strategy=(
-            RecoveryStrategy.NO_ACTION
+        payment_method_distribution=(
+            payment_method_distribution
         ),
+        top_failure_code=(
+            top_failure_code
+        ),
+        top_payment_method=(
+            top_payment_method
+        ),
+        incident_detected=(
+            incident_detected
+        ),
+        incident_type=(
+            incident_type
+        ),
+        revenue_at_risk=(
+            revenue_at_risk
+        ),
+        recommendation=(
+            recommendation
+        ),
+        reason=reason,
     )
 
 
@@ -1135,6 +1358,217 @@ def _calculate_recovery_priority(
         },
     }
 
+@router.post(
+    "/simulation/run",
+)
+def run_batch_simulation(
+    payment_count: int = 100,
+    seed: int = 42,
+):
+    """
+    Run a deterministic batch simulation and return
+    recovery metrics.
+
+    payment_count is translated into the existing
+    SimulationRunConfig structure.
+    """
+
+    if payment_count <= 0:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "payment_count must be greater than zero"
+            ),
+        )
+
+    try:
+
+        # ---------------------------------------------
+        # Keep the simulation simple and deterministic.
+        #
+        # Total orders/payments:
+        #
+        # merchant_count
+        # * customers_per_merchant
+        # * orders_per_customer
+        #
+        # We use one merchant and one order per customer
+        # so payment_count maps directly to the number
+        # of simulated payments.
+        # ---------------------------------------------
+
+        run_config = SimulationRunConfig(
+            seed=seed,
+            merchant_count=1,
+            customers_per_merchant=payment_count,
+            orders_per_customer=1,
+        )
+
+        result = run_simulation(
+            run_config
+        )
+
+        payments = result.payments
+
+        recovery_attempts = (
+            result.recovery_attempts
+        )
+
+        # ---------------------------------------------
+        # Failed payments
+        # ---------------------------------------------
+
+        failed_payments = [
+            payment
+            for payment in payments
+            if payment.status
+            in {
+                PaymentStatus.FAILED,
+                PaymentStatus.RETRY_ELIGIBLE,
+                PaymentStatus.RETRYING,
+            }
+        ]
+
+        # ---------------------------------------------
+        # Successful recoveries
+        # ---------------------------------------------
+
+        successful_recoveries = [
+            attempt
+            for attempt in recovery_attempts
+            if attempt.status
+            == RecoveryStatus.SUCCEEDED
+        ]
+
+        failed_recoveries = [
+            attempt
+            for attempt in recovery_attempts
+            if attempt.status
+            == RecoveryStatus.FAILED
+        ]
+
+        # ---------------------------------------------
+        # Revenue at risk
+        # ---------------------------------------------
+
+        revenue_at_risk = sum(
+            (
+                payment.amount
+                for payment in failed_payments
+            ),
+            Decimal("0"),
+        )
+
+        # ---------------------------------------------
+        # Revenue recovered
+        # ---------------------------------------------
+
+        revenue_recovered = sum(
+            (
+                attempt.actual_revenue
+                or Decimal("0")
+                for attempt in successful_recoveries
+            ),
+            Decimal("0"),
+        )
+
+        # ---------------------------------------------
+        # Recovery rate
+        # ---------------------------------------------
+
+        recovery_rate = 0.0
+
+        if failed_payments:
+
+            recovery_rate = round(
+                (
+                    len(
+                        successful_recoveries
+                    )
+                    / len(
+                        failed_payments
+                    )
+                )
+                * 100,
+                2,
+            )
+
+        # ---------------------------------------------
+        # Recovery success rate
+        # ---------------------------------------------
+
+        recovery_success_rate = 0.0
+
+        if recovery_attempts:
+
+            recovery_success_rate = round(
+                (
+                    len(
+                        successful_recoveries
+                    )
+                    / len(
+                        recovery_attempts
+                    )
+                )
+                * 100,
+                2,
+            )
+
+        return {
+            "simulation": {
+                "payment_count_requested": (
+                    payment_count
+                ),
+                "total_payments_generated": (
+                    len(payments)
+                ),
+                "seed": seed,
+            },
+            "metrics": {
+                "total_payments": (
+                    len(payments)
+                ),
+                "failed_payments": (
+                    len(failed_payments)
+                ),
+                "recovery_candidates": (
+                    len(recovery_attempts)
+                ),
+                "recovery_attempts": (
+                    len(recovery_attempts)
+                ),
+                "successful_recoveries": (
+                    len(successful_recoveries)
+                ),
+                "failed_recoveries": (
+                    len(failed_recoveries)
+                ),
+                "revenue_at_risk": (
+                    str(revenue_at_risk)
+                ),
+                "revenue_recovered": (
+                    str(revenue_recovered)
+                ),
+                "recovery_rate": (
+                    recovery_rate
+                ),
+                "recovery_success_rate": (
+                    recovery_success_rate
+                ),
+            },
+        }
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Simulation failed: "
+                f"{str(exc)}"
+            ),
+        )
+    
 # =========================================================
 # GET /recovery/recommendations
 # =========================================================
@@ -2430,50 +2864,152 @@ def approve_recovery(payment_id: UUID):
     return response
 
 
-@router.post("/{payment_id}/execute")
+# =========================================================
+# POST /recovery/{payment_id}/execute
+# =========================================================
+
+@router.post(
+    "/{payment_id}/execute"
+)
 def execute_recovery(
     payment_id: UUID,
 ):
     """
     Execute an approved recovery attempt.
+
+    The operation is idempotent:
+    repeated execution requests return the original result
+    without executing the recovery again.
     """
 
-    recovery = recovery_store.get(payment_id)
+    _load_recovery_data()
+
+    # -------------------------------------------------
+    # Idempotency check
+    # -------------------------------------------------
+
+    idempotency_key = _get_idempotency_key(
+        "execute",
+        payment_id,
+    )
+
+    previous_response = _get_idempotent_response(
+        idempotency_key,
+    )
+
+    if previous_response is not None:
+
+        return {
+            **previous_response,
+            "idempotent_replay": True,
+        }
+
+    # -------------------------------------------------
+    # Recovery lookup
+    # -------------------------------------------------
+
+    recovery = recovery_store.get(
+        payment_id,
+    )
 
     if recovery is None:
+
         raise HTTPException(
             status_code=404,
-            detail="Recovery attempt not found",
+            detail=(
+                "Recovery attempt not found"
+            ),
         )
 
-    payment = payments_store.get(payment_id)
+    # -------------------------------------------------
+    # Payment lookup
+    # -------------------------------------------------
+
+    payment = payments_store.get(
+        payment_id,
+    )
 
     if payment is None:
+
         raise HTTPException(
             status_code=404,
-            detail="Payment not found",
+            detail=(
+                "Payment not found"
+            ),
         )
 
+    # -------------------------------------------------
+    # Normalize current status
+    # -------------------------------------------------
+
     try:
+
         current_status = RecoveryStatus(
             recovery.status
         )
 
     except ValueError as exc:
+
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown recovery status: {recovery.status}",
+            detail=(
+                "Unknown recovery status: "
+                f"{recovery.status}"
+            ),
         ) from exc
 
-    if current_status != RecoveryStatus.APPROVED:
-        raise HTTPException(
-            status_code=400,
-            detail="Recovery must be approved before execution.",
+    # -------------------------------------------------
+    # Already completed
+    #
+    # This protects against duplicate execution even if
+    # the idempotency cache was cleared or unavailable.
+    # -------------------------------------------------
+
+    if current_status in {
+
+        RecoveryStatus.SUCCEEDED,
+        RecoveryStatus.FAILED,
+
+    }:
+
+        response = recovery.model_dump(
+            mode="json",
         )
 
-    executor = RecoveryExecutor()
+        response[
+            "idempotent_replay"
+        ] = False
+
+        _store_idempotent_response(
+            idempotency_key,
+            response,
+        )
+
+        return response
+
+    # -------------------------------------------------
+    # Validate execution state
+    # -------------------------------------------------
+
+    if (
+        current_status
+        != RecoveryStatus.APPROVED
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Recovery must be approved "
+                "before execution."
+            ),
+        )
+
+    # -------------------------------------------------
+    # Execute recovery
+    # -------------------------------------------------
 
     try:
+
         updated_recovery = executor.execute(
             attempt=recovery,
             payment=payment,
@@ -2481,11 +3017,163 @@ def execute_recovery(
         )
 
     except InvalidRecoveryTransition as exc:
+
         raise HTTPException(
             status_code=400,
             detail=str(exc),
         ) from exc
 
-    recovery_store[payment_id] = updated_recovery
+    # -------------------------------------------------
+    # Persist updated recovery
+    # -------------------------------------------------
 
-    return updated_recovery
+    recovery_store[
+        payment_id
+    ] = updated_recovery
+
+    # -------------------------------------------------
+    # Record execution event
+    #
+    # This happens only once because duplicate requests
+    # return before reaching this point.
+    # -------------------------------------------------
+
+    final_status = (
+        updated_recovery.status.value
+        if hasattr(
+            updated_recovery.status,
+            "value",
+        )
+        else str(
+            updated_recovery.status
+        )
+    )
+
+    _record_recovery_event(
+        payment_id=payment_id,
+        event_type=(
+            "recovery_executed"
+        ),
+        status=final_status,
+        data={
+            "strategy": (
+                updated_recovery.strategy.value
+                if hasattr(
+                    updated_recovery.strategy,
+                    "value",
+                )
+                else str(
+                    updated_recovery.strategy
+                )
+            ),
+            "actual_revenue": str(
+                updated_recovery.actual_revenue
+            ),
+        },
+        actor="recovery_executor",
+    )
+
+    # -------------------------------------------------
+    # Build response
+    # -------------------------------------------------
+
+    response = updated_recovery.model_dump(
+        mode="json",
+    )
+
+    response[
+        "idempotent_replay"
+    ] = False
+
+    # -------------------------------------------------
+    # Store idempotent response
+    # -------------------------------------------------
+
+    _store_idempotent_response(
+        idempotency_key,
+        response,
+    )
+
+    return response
+
+@router.post(
+    "/execute",
+    response_model=RecoveryExecutionResponse,
+)
+def execute_recovery_action(
+    request: RecoveryExecutionRequest,
+):
+    action = request.action.strip().lower()
+
+    if action not in {
+        "retry",
+        "cancel",
+        "manual_review",
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported recovery action",
+        )
+
+    payment = payments_store.get(
+        request.payment_id
+    )
+
+    if payment is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Payment not found",
+        )
+
+    idempotency_key = (
+        request.idempotency_key.strip()
+    )
+
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=400,
+            detail="idempotency_key is required",
+        )
+
+    fingerprint = _build_idempotency_fingerprint(
+        payment_id=request.payment_id,
+        action=action,
+    )
+
+    existing_execution = recovery_execution_store.get(
+        idempotency_key
+    )
+
+    if existing_execution is not None:
+
+        if (
+            existing_execution["fingerprint"]
+            != fingerprint
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Idempotency key has already "
+                    "been used with a different payload"
+                ),
+            )
+
+        return existing_execution["response"]
+
+    execution_response = RecoveryExecutionResponse(
+        execution_id=uuid4(),
+        payment_id=request.payment_id,
+        action=action,
+        status="executed",
+        idempotency_key=idempotency_key,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    recovery_execution_store[
+        idempotency_key
+    ] = {
+        "fingerprint": fingerprint,
+        "response": execution_response,
+    }
+
+    return execution_response
