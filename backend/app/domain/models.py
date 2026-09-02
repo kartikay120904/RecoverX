@@ -56,20 +56,83 @@ class Payment(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
-
 class RecoveryAttempt(BaseModel):
     recovery_id: UUID = Field(default_factory=uuid4)
+
     payment_id: UUID
+
     strategy: RecoveryStrategy
 
-    predicted_probability: float = Field(ge=0, le=1)
-    predicted_revenue: Decimal = Field(ge=0)
+    predicted_probability: float = Field(
+        ge=0,
+        le=1,
+    )
 
-    actual_revenue: Decimal | None = Field(default=None, ge=0)
+    predicted_revenue: Decimal = Field(
+        ge=0,
+    )
+
+    actual_revenue: Decimal | None = Field(
+        default=None,
+        ge=0,
+    )
 
     # RecoverX 2.0 decision intelligence
-    decision_score: float = Field(default=0.0, ge=0, le=1)
-    reason: str = Field(default="Recovery strategy selected from payment failure context.")
+    decision_score: float = Field(
+        default=0.0,
+        ge=0,
+        le=1,
+    )
+
+    reason: str = Field(
+        default=(
+            "Recovery strategy selected from "
+            "payment failure context."
+        )
+    )
 
     status: RecoveryStatus = RecoveryStatus.PROPOSED
-    created_at: datetime = Field(default_factory=utc_now)
+
+    created_at: datetime = Field(
+        default_factory=utc_now,
+    )
+
+
+class RecoveryEvent(BaseModel):
+    """
+    Represents an immutable event in the recovery lifecycle.
+
+    Events are used to build an operational audit trail and
+    recovery timeline for each payment.
+    """
+
+    event_id: UUID = Field(
+        default_factory=uuid4,
+    )
+
+    payment_id: UUID
+
+    event_type: str = Field(
+        min_length=1,
+        max_length=100,
+    )
+
+    timestamp: datetime = Field(
+        default_factory=utc_now,
+    )
+
+    strategy: RecoveryStrategy | None = None
+
+    status: RecoveryStatus | None = None
+
+    details: str | None = Field(
+        default=None,
+        max_length=500,
+    )
+
+    metadata: dict[
+        str,
+        str | int | float | bool | None
+    ] = Field(
+        default_factory=dict,
+    )

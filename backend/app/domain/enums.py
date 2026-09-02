@@ -45,7 +45,7 @@ class RecoveryStrategy(str, Enum):
 class RecoveryStatus(str, Enum):
     PROPOSED = "proposed"
     APPROVED = "approved"
+    EXECUTING = "executing"
     REJECTED = "rejected"
-    EXECUTED = "executed"
     SUCCEEDED = "succeeded"
     FAILED = "failed"

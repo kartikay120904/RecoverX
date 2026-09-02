@@ -1,4 +1,8 @@
 import { useEffect, useState } from "react";
+import { api } from "./services/api";
+import PaymentOperations from "./components/PaymentOperations";
+import RecoveryPanel from "./components/RecoveryPanel";
+import DecisionAnalysis from "./components/DecisionAnalysis";
 import {
   BarChart,
   Bar,
@@ -12,14 +16,119 @@ import "./App.css";
 
 const API = "http://127.0.0.1:8000";
 
+// =============================================================
+// Razorpay Checkout Script Loader
+// =============================================================
+
+function loadRazorpayScript() {
+  return new Promise((resolve) => {
+    if (window.Razorpay) {
+      resolve(true);
+      return;
+    }
+
+    const existingScript = document.querySelector(
+      'script[src="https://checkout.razorpay.com/v1/checkout.js"]'
+    );
+
+    if (existingScript) {
+      existingScript.addEventListener("load", () => resolve(true));
+      existingScript.addEventListener("error", () => resolve(false));
+      return;
+    }
+
+    const script = document.createElement("script");
+
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.async = true;
+
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+
+    document.body.appendChild(script);
+  });
+}
+
+// =============================================================
+// Utility Functions
+// =============================================================
+
+function formatLabel(value) {
+  if (!value) {
+    return "N/A";
+  }
+
+  return String(value)
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+async function getResponseData(response) {
+  try {
+    return await response.json();
+  } catch {
+    return {};
+  }
+}
+
+function getErrorMessage(data, fallback) {
+  if (!data) {
+    return fallback;
+  }
+
+  if (typeof data.detail === "string") {
+    return data.detail;
+  }
+
+  if (typeof data.message === "string") {
+    return data.message;
+  }
+
+  if (typeof data.error === "string") {
+    return data.error;
+  }
+
+  return fallback;
+}
+
+// =============================================================
+// Application
+// =============================================================
+
 function App() {
   const [report, setReport] = useState(null);
   const [comparison, setComparison] = useState(null);
   const [recommendations, setRecommendations] = useState([]);
+  const [recoveryStatuses, setRecoveryStatuses] = useState({});
+
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
   const [actionLoading, setActionLoading] = useState("");
+  const [paymentLoading, setPaymentLoading] = useState("");
+
   const [error, setError] = useState("");
   const [actionMessage, setActionMessage] = useState("");
+  
+  const [backendStatus, setBackendStatus] = useState("Checking backend...");
+  useEffect(() => {
+  api.health()
+    .then(() => {
+      setBackendStatus("Backend connected");
+    })
+    .catch((error) => {
+      console.error("Backend connection failed:", error);
+      setBackendStatus("Backend unavailable");
+    });
+}, []);
+
+  <div className="backend-status">
+  {backendStatus}
+</div>
+
+  // =========================================================
+  // Load Dashboard
+  // =========================================================
 
   async function loadDashboard() {
     try {
@@ -27,29 +136,44 @@ function App() {
       setError("");
       setActionMessage("");
 
-      // =============================
-      // Analytics report
-      // =============================
+      // =====================================================
+      // Analytics Report
+      // =====================================================
 
-      const reportResponse = await fetch(`${API}/analytics/report`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
+      const reportResponse = await fetch(
+        `${API}/analytics/report`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            seed: 42,
+            merchant_count: 20,
+            customers_per_merchant: 100,
+            orders_per_customer: 5,
+          }),
+        }
+      );
+
+      const reportData = await getResponseData(
+        reportResponse
+      );
 
       if (!reportResponse.ok) {
         throw new Error(
-          `Analytics API failed with status ${reportResponse.status}`
+          getErrorMessage(
+            reportData,
+            `Analytics API failed with status ${reportResponse.status}`
+          )
         );
       }
 
-      const reportData = await reportResponse.json();
       setReport(reportData);
 
-      // =============================
-      // Baseline vs incident
-      // =============================
+      // =====================================================
+      // Baseline vs Incident Comparison
+      // =====================================================
 
       const comparisonResponse = await fetch(
         `${API}/simulation/compare`,
@@ -67,6 +191,7 @@ function App() {
               enable_upi_degradation: false,
               enable_gateway_outage: false,
             },
+
             incident_config: {
               seed: 42,
               merchant_count: 20,
@@ -79,29 +204,58 @@ function App() {
         }
       );
 
+      const comparisonData = await getResponseData(
+        comparisonResponse
+      );
+
       if (comparisonResponse.ok) {
-        const comparisonData = await comparisonResponse.json();
         setComparison(comparisonData);
       } else {
         setComparison(null);
       }
 
-      // =============================
-      // Recovery recommendations
-      // =============================
+      // =====================================================
+      // Recovery Recommendations
+      // =====================================================
 
       const recoveryResponse = await fetch(
         `${API}/recovery/recommendations`
       );
 
+      const recoveryData = await getResponseData(
+        recoveryResponse
+      );
+
       if (recoveryResponse.ok) {
-        const recoveryData = await recoveryResponse.json();
-        setRecommendations(recoveryData);
+        const safeRecoveryData = Array.isArray(
+          recoveryData
+        )
+          ? recoveryData
+          : [];
+
+        setRecommendations(safeRecoveryData);
+
+        const statuses = {};
+
+        safeRecoveryData.forEach((item) => {
+          if (item?.payment_id && item?.status) {
+            statuses[item.payment_id] =
+              item.status;
+          }
+        });
+
+        setRecoveryStatuses((previous) => ({
+          ...previous,
+          ...statuses,
+        }));
       } else {
         setRecommendations([]);
       }
     } catch (err) {
-      console.error("Dashboard loading error:", err);
+      console.error(
+        "Dashboard loading error:",
+        err
+      );
 
       setError(
         err instanceof Error
@@ -113,11 +267,39 @@ function App() {
     }
   }
 
-  // =============================
-  // Approve recovery
-  // =============================
+  // =========================================================
+  // Refresh Dashboard
+  // =========================================================
+
+  async function refreshDashboard() {
+    if (refreshing) {
+      return;
+    }
+
+    try {
+      setRefreshing(true);
+      await loadDashboard();
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  // =========================================================
+  // Approve Recovery
+  // =========================================================
 
   async function approveRecovery(paymentId) {
+    if (!paymentId) {
+      setError(
+        "Payment ID is required to approve recovery."
+      );
+      return;
+    }
+
+    if (actionLoading || paymentLoading) {
+      return;
+    }
+
     try {
       setActionLoading(paymentId);
       setActionMessage("");
@@ -133,41 +315,71 @@ function App() {
         }
       );
 
-      const data = await response.json();
+      const data = await getResponseData(response);
 
       if (!response.ok) {
         throw new Error(
-          data.detail || "Failed to approve recovery"
+          getErrorMessage(
+            data,
+            "Failed to approve recovery."
+          )
         );
       }
+
+      setRecoveryStatuses((previous) => ({
+        ...previous,
+        [paymentId]:
+          data.status || "approved",
+      }));
 
       setActionMessage(
         `Recovery approved for payment ${paymentId}`
       );
-
-      await loadDashboard();
     } catch (err) {
-      console.error("Approval error:", err);
+      console.error(
+        "Approval error:",
+        err
+      );
 
       setError(
         err instanceof Error
           ? err.message
-          : "Unable to approve recovery"
+          : "Unable to approve recovery."
       );
     } finally {
       setActionLoading("");
     }
   }
 
-  // =============================
-  // Execute recovery
-  // =============================
+  // =========================================================
+  // Execute Recovery
+  // =========================================================
 
   async function executeRecovery(paymentId) {
+    if (!paymentId) {
+      setError(
+        "Payment ID is required to execute recovery."
+      );
+      return;
+    }
+
+    if (actionLoading || paymentLoading) {
+      return;
+    }
+
     try {
       setActionLoading(paymentId);
       setActionMessage("");
       setError("");
+
+      const currentStatus =
+        recoveryStatuses[paymentId];
+
+      if (currentStatus !== "approved") {
+        throw new Error(
+          "Recovery must be approved before execution."
+        );
+      }
 
       const response = await fetch(
         `${API}/recovery/${paymentId}/execute`,
@@ -179,167 +391,566 @@ function App() {
         }
       );
 
-      const data = await response.json();
+      const data = await getResponseData(response);
 
       if (!response.ok) {
         throw new Error(
-          data.detail || "Failed to execute recovery"
+          getErrorMessage(
+            data,
+            "Failed to execute recovery."
+          )
         );
       }
 
-      const status = formatLabel(data.status);
+      const newStatus =
+        data.status || "succeeded";
+
+      setRecoveryStatuses((previous) => ({
+        ...previous,
+        [paymentId]: newStatus,
+      }));
 
       setActionMessage(
-        `Recovery executed: ${status} for payment ${paymentId}`
+        `Recovery executed: ${formatLabel(
+          newStatus
+        )} for payment ${paymentId}`
       );
-
-      await loadDashboard();
     } catch (err) {
-      console.error("Execution error:", err);
+      console.error(
+        "Execution error:",
+        err
+      );
 
       setError(
         err instanceof Error
           ? err.message
-          : "Unable to execute recovery"
+          : "Unable to execute recovery."
       );
     } finally {
       setActionLoading("");
     }
   }
 
+  // =========================================================
+  // Razorpay Test Mode Checkout
+  // =========================================================
+
+  async function openRazorpayCheckout(
+    recommendation
+  ) {
+    const paymentId =
+      recommendation?.payment_id;
+
+    if (!paymentId) {
+      setError(
+        "Payment ID is missing for this recovery."
+      );
+      return;
+    }
+
+    if (actionLoading || paymentLoading) {
+      return;
+    }
+
+    try {
+      setPaymentLoading(paymentId);
+      setError("");
+      setActionMessage("");
+
+      // =====================================================
+      // Load Razorpay Checkout
+      // =====================================================
+
+      const scriptLoaded =
+        await loadRazorpayScript();
+
+      if (
+        !scriptLoaded ||
+        !window.Razorpay
+      ) {
+        throw new Error(
+          "Razorpay Checkout could not be loaded. Please check your internet connection."
+        );
+      }
+
+      // =====================================================
+      // Determine Recovery Amount
+      // =====================================================
+
+      const predictedRevenue = Number(
+        recommendation.predicted_revenue || 0
+      );
+
+      if (
+        !Number.isFinite(
+          predictedRevenue
+        ) ||
+        predictedRevenue <= 0
+      ) {
+        throw new Error(
+          "A valid recovery amount is required before starting payment."
+        );
+      }
+
+      // Razorpay expects INR amount in paise.
+
+      const amount = Math.round(
+        predictedRevenue * 100
+      );
+
+      if (amount <= 0) {
+        throw new Error(
+          "The Razorpay order amount must be greater than zero."
+        );
+      }
+
+      // =====================================================
+      // Create Razorpay Test Mode Order
+      // =====================================================
+
+      const orderResponse = await fetch(
+        `${API}/razorpay/order`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+          body: JSON.stringify({
+            amount,
+            currency: "INR",
+            receipt: `recoverx_${paymentId}`,
+          }),
+        }
+      );
+
+      const orderData =
+        await getResponseData(
+          orderResponse
+        );
+
+      if (!orderResponse.ok) {
+        throw new Error(
+          getErrorMessage(
+            orderData,
+            "Unable to create Razorpay order."
+          )
+        );
+      }
+
+      if (orderData.mode !== "test") {
+        throw new Error(
+          "RecoverX Razorpay integration is not running in Test Mode."
+        );
+      }
+
+      const order = orderData.order;
+
+      if (!order?.id) {
+        throw new Error(
+          "Razorpay returned an invalid order."
+        );
+      }
+
+      // =====================================================
+      // Get Razorpay Public Test Key
+      // =====================================================
+
+      const configResponse = await fetch(
+        `${API}/razorpay/config`
+      );
+
+      const configData =
+        await getResponseData(
+          configResponse
+        );
+
+      if (
+        !configResponse.ok ||
+        !configData.key_id
+      ) {
+        throw new Error(
+          "Razorpay configuration could not be loaded."
+        );
+      }
+
+      if (
+        configData.mode !== "test"
+      ) {
+        throw new Error(
+          "RecoverX payment checkout is not running in Test Mode."
+        );
+      }
+
+      // =====================================================
+      // Razorpay Checkout Options
+      // =====================================================
+
+      const options = {
+        key: configData.key_id,
+
+        amount: order.amount,
+
+        currency:
+          order.currency || "INR",
+
+        name: "RecoverX",
+
+        description:
+          "Payment Recovery",
+
+        order_id: order.id,
+
+        handler: async function (
+          response
+        ) {
+          try {
+            setPaymentLoading(
+              paymentId
+            );
+
+            setError("");
+            setActionMessage("");
+
+            // ===============================================
+            // Server-side Signature Verification
+            // ===============================================
+
+            const verifyResponse =
+              await fetch(
+                `${API}/razorpay/verify`,
+                {
+                  method: "POST",
+
+                  headers: {
+                    "Content-Type":
+                      "application/json",
+                  },
+
+                  body: JSON.stringify({
+                    razorpay_order_id:
+                      response.razorpay_order_id,
+
+                    razorpay_payment_id:
+                      response.razorpay_payment_id,
+
+                    razorpay_signature:
+                      response.razorpay_signature,
+                  }),
+                }
+              );
+
+            const verifyData =
+              await getResponseData(
+                verifyResponse
+              );
+
+            if (
+              !verifyResponse.ok
+            ) {
+              throw new Error(
+                getErrorMessage(
+                  verifyData,
+                  "Payment verification failed."
+                )
+              );
+            }
+
+            if (
+              !verifyData.verified
+            ) {
+              throw new Error(
+                "Razorpay payment could not be verified."
+              );
+            }
+
+            setActionMessage(
+              `Payment verified successfully for recovery ${paymentId}`
+            );
+          } catch (err) {
+            console.error(
+              "Razorpay verification error:",
+              err
+            );
+
+            setError(
+              err instanceof Error
+                ? err.message
+                : "Payment verification failed."
+            );
+          } finally {
+            setPaymentLoading("");
+          }
+        },
+
+        modal: {
+          ondismiss: function () {
+            setPaymentLoading("");
+
+            setActionMessage(
+              "Razorpay checkout was closed."
+            );
+          },
+        },
+
+        theme: {
+          color: "#111827",
+        },
+      };
+
+      // =====================================================
+      // Open Razorpay Checkout
+      // =====================================================
+
+      const razorpay =
+        new window.Razorpay(
+          options
+        );
+
+      razorpay.on(
+        "payment.failed",
+        function (response) {
+          console.error(
+            "Razorpay payment failed:",
+            response
+          );
+
+          const description =
+            response?.error
+              ?.description ||
+            "Razorpay payment failed.";
+
+          setError(description);
+
+          setPaymentLoading("");
+        }
+      );
+
+      razorpay.open();
+    } catch (err) {
+      console.error(
+        "Razorpay checkout error:",
+        err
+      );
+
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to start Razorpay checkout."
+      );
+
+      setPaymentLoading("");
+    }
+  }
+  <PaymentOperations />
+
+
+  // =========================================================
+  // Initial Load
+  // =========================================================
+
   useEffect(() => {
     loadDashboard();
   }, []);
 
-  // =============================
-  // Loading
-  // =============================
+  // =========================================================
+  // Loading Screen
+  // =========================================================
 
   if (loading) {
     return (
       <div className="app loading-screen">
         <div>
-          <div className="logo">RecoverX</div>
-          <p>Loading payment intelligence...</p>
+          <div className="logo">
+            RecoverX
+          </div>
+
+          <p>
+            Loading payment intelligence...
+          </p>
         </div>
       </div>
     );
   }
 
-  // =============================
-  // Error
-  // =============================
+  // =========================================================
+  // Backend Connection Error
+  // =========================================================
 
-  if (error || !report) {
+  if (!report) {
     return (
       <div className="app loading-screen">
         <div className="error-card">
-          <h2>Backend connection failed</h2>
+          <h2>
+            Backend connection failed
+          </h2>
 
           <p>
-            {error || "Analytics report could not be loaded."}
+            {error ||
+              "Analytics report could not be loaded."}
           </p>
 
-          <button onClick={loadDashboard}>
+          <button
+            onClick={loadDashboard}
+          >
             Retry
           </button>
 
           <small>
-            Make sure FastAPI is running on port 8000.
+            Make sure FastAPI is running on
+            port 8000.
           </small>
         </div>
       </div>
     );
   }
+  <RecoveryPanel />
+  // =========================================================
+  // Core Data
+  // =========================================================
 
-  // =============================
-  // Core data
-  // =============================
+  const metrics =
+    report.metrics || {};
 
-  const metrics = report.metrics || {};
-  const incident = report.incident || {};
+  const incident =
+    report.incident || {};
 
-  // =============================
-  // Payment methods
-  // =============================
+  // =========================================================
+  // Payment Methods
+  // =========================================================
 
-  const methodData = Object.entries(
-    report.success_rate_by_method || {}
-  ).map(([method, rate]) => ({
-    method: method.toUpperCase(),
-    success: Number((rate * 100).toFixed(2)),
-  }));
+  const methodData =
+    Object.entries(
+      report.success_rate_by_method || {}
+    ).map(
+      ([method, rate]) => ({
+        method:
+          method.toUpperCase(),
 
-  // =============================
-  // Failure codes
-  // =============================
+        success: Number(
+          (
+            Number(rate) * 100
+          ).toFixed(2)
+        ),
+      })
+    );
 
-  const failureCodeData = Object.entries(
-    report.failure_code_distribution || {}
-  )
-    .map(([code, count]) => ({
-      code: formatLabel(code),
-      count,
-    }))
-    .sort((a, b) => b.count - a.count);
+  // =========================================================
+  // Failure Codes
+  // =========================================================
 
-  // =============================
-  // Customer segments
-  // =============================
+  const failureCodeData =
+    Object.entries(
+      report.failure_code_distribution || {}
+    )
+      .map(
+        ([code, count]) => ({
+          code:
+            formatLabel(code),
 
-  const segmentData = Object.entries(
-    report.failure_rate_by_customer_segment || {}
-  )
-    .map(([segment, rate]) => ({
-      segment: formatLabel(segment),
-      failure: Number((rate * 100).toFixed(2)),
-    }))
-    .sort((a, b) => b.failure - a.failure);
+          count:
+            Number(count) || 0,
+        })
+      )
+      .sort(
+        (a, b) =>
+          b.count - a.count
+      );
 
-  // =============================
-  // Merchant risk
-  // =============================
+  // =========================================================
+  // Customer Segments
+  // =========================================================
 
-  const merchantData = Object.entries(
-    report.failure_rate_by_merchant || {}
-  )
-    .map(([merchant, rate]) => ({
-      merchant,
-      failure: Number((rate * 100).toFixed(2)),
-    }))
-    .sort((a, b) => b.failure - a.failure)
-    .slice(0, 8);
+  const segmentData =
+    Object.entries(
+      report.failure_rate_by_customer_segment ||
+        {}
+    )
+      .map(
+        ([segment, rate]) => ({
+          segment:
+            formatLabel(segment),
 
-  // =============================
-  // Recovery revenue
-  // =============================
+          failure: Number(
+            (
+              Number(rate) * 100
+            ).toFixed(2)
+          ),
+        })
+      )
+      .sort(
+        (a, b) =>
+          b.failure - a.failure
+      );
 
-  const recoveryRevenue = recommendations.reduce(
-    (sum, item) =>
-      sum + Number(item.predicted_revenue || 0),
-    0
-  );
+  // =========================================================
+  // Merchant Risk
+  // =========================================================
 
-  // =============================
-  // Risk summaries
-  // =============================
+  const merchantData =
+    Object.entries(
+      report.failure_rate_by_merchant || {}
+    )
+      .map(
+        ([merchant, rate]) => ({
+          merchant,
 
-  const highestRiskSegment = segmentData[0];
-  const highestFailureCode = failureCodeData[0];
+          failure: Number(
+            (
+              Number(rate) * 100
+            ).toFixed(2)
+          ),
+        })
+      )
+      .sort(
+        (a, b) =>
+          b.failure - a.failure
+      )
+      .slice(0, 8);
 
-  // =============================
-  // Incident status
-  // =============================
+  // =========================================================
+  // Recovery Revenue
+  // =========================================================
 
-  const incidentDetected = Boolean(incident.detected);
+  const recoveryRevenue =
+    recommendations.reduce(
+      (sum, item) =>
+        sum +
+        Number(
+          item?.predicted_revenue || 0
+        ),
+      0
+    );
 
-  const incidentSeverity = incident.severity
-    ? incident.severity.toUpperCase()
-    : "NORMAL";
+  <DecisionAnalysis />
 
-  // =============================
-  // Render
-  // =============================
+  // =========================================================
+  // Risk Summary
+  // =========================================================
+
+  const highestRiskSegment =
+    segmentData[0];
+
+  const highestFailureCode =
+    failureCodeData[0];
+
+  // =========================================================
+  // Incident Status
+  // =========================================================
+
+  const incidentDetected =
+    Boolean(incident.detected);
+
+  const incidentSeverity =
+    incident.severity
+      ? String(
+          incident.severity
+        ).toUpperCase()
+      : "NORMAL";
+
+  // =========================================================
+  // Dashboard
+  // =========================================================
 
   return (
     <div className="app">
@@ -353,23 +964,33 @@ function App() {
           </div>
 
           <div className="subtitle">
-            Payment Recovery Intelligence Platform
+            Payment Recovery Intelligence
+            Platform
           </div>
         </div>
 
         <div className="header-actions">
           <span
             className={`status-dot ${
-              incidentDetected ? "danger" : ""
+              incidentDetected
+                ? "danger"
+                : ""
             }`}
           />
 
-          {incidentDetected
-            ? "Incident Detected"
-            : "System Operational"}
+          <span>
+            {incidentDetected
+              ? "Incident Detected"
+              : "System Operational"}
+          </span>
 
-          <button onClick={loadDashboard}>
-            Refresh
+          <button
+            onClick={refreshDashboard}
+            disabled={refreshing}
+          >
+            {refreshing
+              ? "Refreshing..."
+              : "Refresh"}
           </button>
         </div>
       </header>
@@ -389,9 +1010,11 @@ function App() {
             </h1>
 
             <p>
-              Monitor payment failures, detect incidents,
-              identify risk, and prioritize recovery actions
-              from one intelligence layer.
+              Monitor payment failures,
+              detect incidents, identify
+              risk, and prioritize recovery
+              actions from one intelligence
+              layer.
             </p>
           </div>
         </section>
@@ -403,7 +1026,9 @@ function App() {
           <MetricCard
             label="Success Rate"
             value={`${(
-              Number(metrics.success_rate || 0) * 100
+              Number(
+                metrics.success_rate || 0
+              ) * 100
             ).toFixed(2)}%`}
             detail={`${Number(
               metrics.successful_payments || 0
@@ -416,7 +1041,9 @@ function App() {
               metrics.failed_payments || 0
             ).toLocaleString()}
             detail={`${(
-              Number(metrics.failure_rate || 0) * 100
+              Number(
+                metrics.failure_rate || 0
+              ) * 100
             ).toFixed(2)}% failure rate`}
             danger
           />
@@ -445,7 +1072,7 @@ function App() {
 
         </section>
 
-        {/* ================= ACTION MESSAGE ================= */}
+        {/* ================= MESSAGES ================= */}
 
         {actionMessage && (
           <div className="success-message">
@@ -453,11 +1080,15 @@ function App() {
           </div>
         )}
 
-        {/* ================= PERFORMANCE + INCIDENT ================= */}
+        {error && (
+          <div className="error-message">
+            {error}
+          </div>
+        )}
+
+        {/* ================= PERFORMANCE ================= */}
 
         <section className="content-grid">
-
-          {/* Payment performance */}
 
           <div className="panel chart-panel">
 
@@ -474,19 +1105,26 @@ function App() {
             </div>
 
             <div className="chart">
+
               <ResponsiveContainer
                 width="100%"
                 height={300}
               >
-                <BarChart data={methodData}>
+                <BarChart
+                  data={methodData}
+                >
 
                   <CartesianGrid
                     strokeDasharray="3 3"
                   />
 
-                  <XAxis dataKey="method" />
+                  <XAxis
+                    dataKey="method"
+                  />
 
-                  <YAxis domain={[0, 100]} />
+                  <YAxis
+                    domain={[0, 100]}
+                  />
 
                   <Tooltip
                     formatter={(value) => [
@@ -498,16 +1136,21 @@ function App() {
                   <Bar
                     dataKey="success"
                     name="Success %"
-                    radius={[6, 6, 0, 0]}
+                    radius={[
+                      6,
+                      6,
+                      0,
+                      0,
+                    ]}
                   />
 
                 </BarChart>
               </ResponsiveContainer>
-            </div>
 
+            </div>
           </div>
 
-          {/* Incident status */}
+          {/* ================= INCIDENT ================= */}
 
           <div className="panel incident-panel">
 
@@ -525,15 +1168,20 @@ function App() {
 
             <div
               className={`incident-state ${
-                incidentDetected ? "active" : ""
+                incidentDetected
+                  ? "active"
+                  : ""
               }`}
             >
 
               <div className="incident-icon">
-                {incidentDetected ? "!" : "✓"}
+                {incidentDetected
+                  ? "!"
+                  : "✓"}
               </div>
 
               <div>
+
                 <strong>
                   {incidentDetected
                     ? `${incidentSeverity} INCIDENT`
@@ -547,6 +1195,7 @@ function App() {
                       ).toLocaleString()} payments affected`
                     : "No significant payment incident detected"}
                 </p>
+
               </div>
 
             </div>
@@ -560,8 +1209,9 @@ function App() {
 
                 <strong>
                   {(
-                    Number(metrics.failure_rate || 0) *
-                    100
+                    Number(
+                      metrics.failure_rate || 0
+                    ) * 100
                   ).toFixed(2)}
                   %
                 </strong>
@@ -589,6 +1239,7 @@ function App() {
         {/* ================= BASELINE VS INCIDENT ================= */}
 
         {comparison && (
+
           <section className="panel comparison-panel">
 
             <div className="panel-header">
@@ -610,18 +1261,20 @@ function App() {
                 label="Failure Rate"
                 baseline={`${(
                   Number(
-                    comparison.baseline?.failure_rate || 0
+                    comparison.baseline
+                      ?.failure_rate || 0
                   ) * 100
                 ).toFixed(2)}%`}
                 incident={`${(
                   Number(
-                    comparison.incident?.failure_rate || 0
+                    comparison.incident
+                      ?.failure_rate || 0
                   ) * 100
                 ).toFixed(2)}%`}
                 delta={`+${(
                   Number(
-                    comparison.impact?.failure_rate_delta ||
-                      0
+                    comparison.impact
+                      ?.failure_rate_delta || 0
                   ) * 100
                 ).toFixed(2)}%`}
               />
@@ -629,41 +1282,44 @@ function App() {
               <ComparisonCard
                 label="Failed Payments"
                 baseline={Number(
-                  comparison.baseline?.failed_payments || 0
+                  comparison.baseline
+                    ?.failed_payments || 0
                 ).toLocaleString()}
                 incident={Number(
-                  comparison.incident?.failed_payments || 0
+                  comparison.incident
+                    ?.failed_payments || 0
                 ).toLocaleString()}
                 delta={`+${Number(
-                  comparison.impact?.failed_payments_delta ||
-                    0
+                  comparison.impact
+                    ?.failed_payments_delta || 0
                 ).toLocaleString()}`}
               />
 
               <ComparisonCard
                 label="Failed Volume"
                 baseline={`₹${Number(
-                  comparison.baseline?.failed_volume || 0
+                  comparison.baseline
+                    ?.failed_volume || 0
                 ).toLocaleString()}`}
                 incident={`₹${Number(
-                  comparison.incident?.failed_volume || 0
+                  comparison.incident
+                    ?.failed_volume || 0
                 ).toLocaleString()}`}
                 delta={`+₹${Number(
-                  comparison.impact?.failed_volume_delta ||
-                    0
+                  comparison.impact
+                    ?.failed_volume_delta || 0
                 ).toLocaleString()}`}
               />
 
             </div>
 
           </section>
+
         )}
 
         {/* ================= FAILURE ANALYSIS ================= */}
 
         <section className="analysis-grid">
-
-          {/* Failure codes */}
 
           <div className="panel">
 
@@ -674,7 +1330,8 @@ function App() {
                 </h2>
 
                 <span>
-                  Root causes behind failed payments
+                  Root causes behind failed
+                  payments
                 </span>
               </div>
             </div>
@@ -685,6 +1342,7 @@ function App() {
                 width="100%"
                 height={320}
               >
+
                 <BarChart
                   data={failureCodeData}
                   layout="vertical"
@@ -698,7 +1356,9 @@ function App() {
                     strokeDasharray="3 3"
                   />
 
-                  <XAxis type="number" />
+                  <XAxis
+                    type="number"
+                  />
 
                   <YAxis
                     type="category"
@@ -711,17 +1371,23 @@ function App() {
                   <Bar
                     dataKey="count"
                     name="Failed Payments"
-                    radius={[0, 6, 6, 0]}
+                    radius={[
+                      0,
+                      6,
+                      6,
+                      0,
+                    ]}
                   />
 
                 </BarChart>
+
               </ResponsiveContainer>
 
             </div>
 
           </div>
 
-          {/* Customer segments */}
+          {/* ================= CUSTOMER SEGMENTS ================= */}
 
           <div className="panel">
 
@@ -732,7 +1398,8 @@ function App() {
                 </h2>
 
                 <span>
-                  Failure rate across customer segments
+                  Failure rate across customer
+                  segments
                 </span>
               </div>
             </div>
@@ -743,13 +1410,18 @@ function App() {
                 width="100%"
                 height={320}
               >
-                <BarChart data={segmentData}>
+
+                <BarChart
+                  data={segmentData}
+                >
 
                   <CartesianGrid
                     strokeDasharray="3 3"
                   />
 
-                  <XAxis dataKey="segment" />
+                  <XAxis
+                    dataKey="segment"
+                  />
 
                   <YAxis
                     domain={[0, "auto"]}
@@ -768,10 +1440,16 @@ function App() {
                   <Bar
                     dataKey="failure"
                     name="Failure Rate"
-                    radius={[6, 6, 0, 0]}
+                    radius={[
+                      6,
+                      6,
+                      0,
+                      0,
+                    ]}
                   />
 
                 </BarChart>
+
               </ResponsiveContainer>
 
             </div>
@@ -792,7 +1470,8 @@ function App() {
               </h2>
 
               <span>
-                Merchants ranked by payment failure rate
+                Merchants ranked by payment
+                failure rate
               </span>
             </div>
 
@@ -805,52 +1484,63 @@ function App() {
           <div className="merchant-table">
 
             <div className="merchant-row merchant-header">
-              <span>Rank</span>
-              <span>Merchant ID</span>
-              <span>Failure Rate</span>
-              <span>Risk</span>
+
+              <span>
+                Rank
+              </span>
+
+              <span>
+                Merchant ID
+              </span>
+
+              <span>
+                Failure Rate
+              </span>
+
+              <span>
+                Risk
+              </span>
+
             </div>
 
-            {merchantData.map((merchant, index) => {
+            {merchantData.map(
+              (merchant, index) => {
 
-              const risk =
-                merchant.failure >= 15
-                  ? "high"
-                  : merchant.failure >= 13
-                  ? "medium"
-                  : "low";
+                const risk =
+                  merchant.failure >= 15
+                    ? "high"
+                    : merchant.failure >= 13
+                    ? "medium"
+                    : "low";
 
-              return (
-                <div
-                  className="merchant-row"
-                  key={merchant.merchant}
-                >
-
-                  <span className="merchant-rank">
-                    #{index + 1}
-                  </span>
-
-                  <span className="merchant-id">
-                    {merchant.merchant}
-                  </span>
-
-                  <strong className="merchant-rate">
-                    {merchant.failure}%
-                  </strong>
-
-                  <span
-                    className={`risk-badge ${risk}`}
+                return (
+                  <div
+                    className="merchant-row"
+                    key={merchant.merchant}
                   >
-                    {risk === "high"
-                      ? "High"
-                      : risk === "medium"
-                      ? "Medium"
-                      : "Low"}
-                  </span>
 
-                </div>
-              );
-            })}
+                    <span className="merchant-rank">
+                      #{index + 1}
+                    </span>
+
+                    <span className="merchant-id">
+                      {merchant.merchant}
+                    </span>
+
+                    <strong className="merchant-rate">
+                      {merchant.failure}%
+                    </strong>
+
+                    <span
+                      className={`risk-badge ${risk}`}
+                    >
+                      {formatLabel(risk)}
+                    </span>
+
+                  </div>
+                );
+              }
+            )}
 
           </div>
 
@@ -867,7 +1557,8 @@ function App() {
             </span>
 
             <strong>
-              {highestFailureCode?.code || "N/A"}
+              {highestFailureCode?.code ||
+                "N/A"}
             </strong>
 
             <p>
@@ -885,7 +1576,8 @@ function App() {
             </span>
 
             <strong>
-              {highestRiskSegment?.segment || "N/A"}
+              {highestRiskSegment?.segment ||
+                "N/A"}
             </strong>
 
             <p>
@@ -903,7 +1595,8 @@ function App() {
             </span>
 
             <strong>
-              ₹{Number(
+              ₹
+              {Number(
                 incident.affected_volume || 0
               ).toLocaleString()}
             </strong>
@@ -932,7 +1625,8 @@ function App() {
               </h2>
 
               <span>
-                Recommended actions for failed payments
+                Recommended actions for failed
+                payments
               </span>
             </div>
 
@@ -947,103 +1641,215 @@ function App() {
             {recommendations.length === 0 ? (
 
               <div className="empty-state">
+
                 <strong>
                   No recovery actions required
                 </strong>
 
                 <span>
-                  RecoverX did not identify any failed
-                  payments requiring recovery.
+                  RecoverX did not identify any
+                  failed payments requiring
+                  recovery.
                 </span>
+
               </div>
 
             ) : (
 
               recommendations
                 .slice(0, 8)
-                .map((recommendation) => {
+                .map(
+                  (recommendation) => {
 
-                  const paymentId =
-                    recommendation.payment_id;
+                    const paymentId =
+                      recommendation.payment_id;
 
-                  const isLoading =
-                    actionLoading === paymentId;
+                    const isActionLoading =
+                      actionLoading ===
+                      paymentId;
 
-                  return (
-                    <div
-                      className="recommendation"
-                      key={paymentId}
-                    >
+                    const isPaymentLoading =
+                      paymentLoading ===
+                      paymentId;
 
-                      <div className="recommendation-main">
+                    const status =
+                      recoveryStatuses[
+                        paymentId
+                      ] ||
+                      recommendation.status ||
+                      "proposed";
 
-                        <strong>
-                          {formatLabel(
-                            recommendation.strategy
-                          )}
-                        </strong>
+                    return (
 
-                        <span>
-                          {recommendation.reason}
-                        </span>
+                      <div
+                        className="recommendation"
+                        key={paymentId}
+                      >
 
-                        <small className="payment-id">
-                          Payment: {paymentId}
-                        </small>
+                        <div className="recommendation-main">
 
-                      </div>
+                          <strong>
+                            {formatLabel(
+                              recommendation.strategy
+                            )}
+                          </strong>
 
-                      <div className="recommendation-value">
+                          <span>
+                            {recommendation.reason ||
+                              "Recovery strategy recommended by RecoverX."}
+                          </span>
 
-                        <strong>
-                          {(
-                            Number(
-                              recommendation.predicted_probability ||
+                          <small className="payment-id">
+                            Payment:{" "}
+                            {paymentId}
+                          </small>
+
+                        </div>
+
+                        <div className="recommendation-value">
+
+                          <strong>
+                            {(
+                              Number(
+                                recommendation.predicted_probability ||
+                                  0
+                              ) * 100
+                            ).toFixed(0)}
+                            %
+                          </strong>
+
+                          <span>
+                            ₹
+                            {Number(
+                              recommendation.predicted_revenue ||
                                 0
-                            ) * 100
-                          ).toFixed(0)}
-                          %
-                        </strong>
+                            ).toLocaleString()}
+                          </span>
 
-                        <span>
-                          ₹
-                          {Number(
-                            recommendation.predicted_revenue ||
-                              0
-                          ).toLocaleString()}
-                        </span>
+                          <div className="recovery-actions">
 
-                        <div className="recovery-actions">
+                            {/* APPROVE */}
 
-                          <button
-                            className="approve-button"
-                            disabled={isLoading}
-                            onClick={() =>
-                              approveRecovery(paymentId)
-                            }
-                          >
-                            {isLoading
-                              ? "Processing..."
-                              : "Approve"}
-                          </button>
+                            {status ===
+                              "proposed" && (
 
-                          <button
-                            className="execute-button"
-                            disabled={isLoading}
-                            onClick={() =>
-                              executeRecovery(paymentId)
-                            }
-                          >
-                            Execute
-                          </button>
+                              <button
+                                className="approve-button"
+                                disabled={
+                                  isActionLoading ||
+                                  isPaymentLoading
+                                }
+                                onClick={() =>
+                                  approveRecovery(
+                                    paymentId
+                                  )
+                                }
+                              >
+                                {isActionLoading
+                                  ? "Approving..."
+                                  : "Approve"}
+                              </button>
+
+                            )}
+
+                            {/* EXECUTE */}
+
+                            {status ===
+                              "approved" && (
+
+                              <button
+                                className="execute-button"
+                                disabled={
+                                  isActionLoading ||
+                                  isPaymentLoading
+                                }
+                                onClick={() =>
+                                  executeRecovery(
+                                    paymentId
+                                  )
+                                }
+                              >
+                                {isActionLoading
+                                  ? "Executing..."
+                                  : "Execute Recovery"}
+                              </button>
+
+                            )}
+
+                            {/* RAZORPAY */}
+
+                            {status ===
+                              "approved" && (
+
+                              <button
+                                className="razorpay-button"
+                                disabled={
+                                  isActionLoading ||
+                                  isPaymentLoading
+                                }
+                                onClick={() =>
+                                  openRazorpayCheckout(
+                                    recommendation
+                                  )
+                                }
+                              >
+                                {isPaymentLoading
+                                  ? "Opening Checkout..."
+                                  : "Pay with Razorpay"}
+                              </button>
+
+                            )}
+
+                            {/* SUCCESS */}
+
+                            {status ===
+                              "succeeded" && (
+
+                              <span className="status-badge succeeded">
+                                ✓ Recovered
+                              </span>
+
+                            )}
+
+                            {/* FAILED */}
+
+                            {status ===
+                              "failed" && (
+
+                              <span className="status-badge failed">
+                                Failed
+                              </span>
+
+                            )}
+
+                            {/* OTHER */}
+
+                            {![
+                              "proposed",
+                              "approved",
+                              "succeeded",
+                              "failed",
+                            ].includes(
+                              status
+                            ) && (
+
+                              <span className="status-badge">
+                                {formatLabel(
+                                  status
+                                )}
+                              </span>
+
+                            )}
+
+                          </div>
 
                         </div>
 
                       </div>
 
-                    </div>
-                  );
-                })
+                    );
+                  }
+                )
 
             )}
 
@@ -1052,29 +1858,14 @@ function App() {
         </section>
 
       </main>
+
     </div>
   );
 }
 
-// =============================================
-// Utility
-// =============================================
-
-function formatLabel(value) {
-  if (!value) {
-    return "N/A";
-  }
-
-  return String(value)
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (letter) =>
-      letter.toUpperCase()
-    );
-}
-
-// =============================================
+// =============================================================
 // Metric Card
-// =============================================
+// =============================================================
 
 function MetricCard({
   label,
@@ -1085,9 +1876,12 @@ function MetricCard({
   return (
     <div
       className={`metric-card ${
-        danger ? "danger-card" : ""
+        danger
+          ? "danger-card"
+          : ""
       }`}
     >
+
       <span>
         {label}
       </span>
@@ -1099,13 +1893,14 @@ function MetricCard({
       <small>
         {detail}
       </small>
+
     </div>
   );
 }
 
-// =============================================
+// =============================================================
 // Comparison Card
-// =============================================
+// =============================================================
 
 function ComparisonCard({
   label,
