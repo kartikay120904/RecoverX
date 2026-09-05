@@ -442,6 +442,84 @@ This helps businesses understand the financial impact of payment failures.
 
 ---
 
+---
+
+# 📸 Platform Preview
+
+## 🖥️ Payment Recovery Intelligence Dashboard
+
+RecoverX provides a centralized view of payment activity, failure patterns, recovery opportunities, and payment intelligence.
+
+![RecoverX Dashboard Overview](./assets/screenshots/dashboard-overview.png)
+
+The dashboard provides visibility into:
+
+- Payment success rate
+- Failed payments
+- Failed payment volume
+- Recovery opportunity
+- Payment operations
+- Backend connection status
+- Active payment incidents
+
+---
+
+## 🧠 AI Decision Intelligence
+
+The AI Decision Intelligence module allows users to analyze failed payments and compare possible recovery approaches.
+
+![RecoverX AI Decision Intelligence](./assets/screenshots/decision-intelligence.png)
+
+Users can:
+
+- Enter a Payment ID
+- Run an adaptive recovery decision
+- Run counterfactual analysis
+- Investigate payment failure context
+- Generate recovery recommendations
+- Access the Recovery Control Center
+
+The goal is to move from simple payment monitoring toward intelligent recovery decision support.
+
+---
+
+## 📊 Payment Intelligence Analytics
+
+RecoverX analyzes payment performance and failure patterns across the payment ecosystem.
+
+![RecoverX Payment Analytics](./assets/screenshots/payment-analytics.png)
+
+The analytics layer provides insights into:
+
+- Payment method performance
+- Failure code distribution
+- Customer segment risk
+- Payment failure trends
+- Risk concentration
+
+This helps identify where payment failures are occurring and which areas require investigation.
+
+---
+
+## 🏪 Merchant Risk Intelligence
+
+RecoverX ranks merchants based on observed payment failure patterns and risk levels.
+
+![RecoverX Merchant Risk Intelligence](./assets/screenshots/merchant-risk.png)
+
+The platform highlights key intelligence such as:
+
+- Merchant failure rankings
+- Failure rates
+- Risk classification
+- Primary payment failure driver
+- Highest-risk customer segment
+- Affected payment volume
+
+This enables payment operations teams to prioritize investigation and recovery efforts.
+
+---
+
 # 🏗️ System Architecture
 
 The RecoverX architecture is organized around multiple intelligence components.
