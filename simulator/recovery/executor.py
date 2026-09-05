@@ -7,18 +7,55 @@ from backend.app.domain.models import (
     RecoveryAttempt,
 )
 from backend.app.domain.state_machine import (
+    InvalidRecoveryTransition,
     transition_recovery,
 )
-from backend.app.services.recovery_event_service import (
-    recovery_event_service,
+
+from simulator.recovery.guardrails import (
+    RecoveryGuardrails,
 )
 
 
 class RecoveryExecutor:
     """
-    Executes a recovery attempt and records an immutable
-    recovery audit trail.
+    Executes recovery attempts through a bounded,
+    guardrail-controlled recovery workflow.
+
+    Supported executable states:
+
+        PROPOSED
+            -> EXECUTING
+            -> SUCCEEDED / FAILED
+
+        APPROVED
+            -> EXECUTING
+            -> SUCCEEDED / FAILED
+
+        SCHEDULED
+            -> EXECUTING
+            -> SUCCEEDED / FAILED
+
+        EXECUTING
+            -> SUCCEEDED / FAILED
     """
+
+    EXECUTABLE_STATUSES = {
+        RecoveryStatus.PROPOSED,
+        RecoveryStatus.APPROVED,
+        RecoveryStatus.SCHEDULED,
+        RecoveryStatus.EXECUTING,
+    }
+
+    def __init__(
+        self,
+        guardrails: RecoveryGuardrails | None = None,
+    ) -> None:
+
+        self.guardrails = (
+            guardrails
+            if guardrails is not None
+            else RecoveryGuardrails()
+        )
 
     def execute(
         self,
@@ -26,114 +63,169 @@ class RecoveryExecutor:
         payment: Payment,
         rng: Random,
     ) -> RecoveryAttempt:
+        """
+        Execute a recovery attempt.
+        """
 
-        if attempt.status not in {
-            RecoveryStatus.PROPOSED,
-            RecoveryStatus.APPROVED,
-        }:
+        # ---------------------------------------------
+        # Validate lifecycle state
+        # ---------------------------------------------
+
+        if (
+            attempt.status
+            not in self.EXECUTABLE_STATUSES
+        ):
+
             raise ValueError(
-                "Only proposed recovery attempts can be executed"
+                "Only proposed recovery attempts "
+                "can be executed"
             )
 
-        # -------------------------------------------------
-        # Start execution
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # Evaluate guardrails
+        # ---------------------------------------------
 
-        transition_recovery(
-            attempt,
-            RecoveryStatus.EXECUTING,
+        decision = (
+            self.guardrails.evaluate(
+                payment=payment,
+                attempt=attempt,
+            )
         )
 
-        recovery_event_service.record_event(
-            payment_id=payment.payment_id,
-            event_type="recovery.execution_started",
-            status=RecoveryStatus.EXECUTING,
-            strategy=attempt.strategy,
-            details="Recovery attempt execution started.",
-            metadata={
-                "recovery_id": str(
-                    attempt.recovery_id
-                ),
-                "predicted_probability": (
-                    attempt.predicted_probability
-                ),
-                "decision_score": (
-                    attempt.decision_score
-                ),
-            },
-        )
+        # ---------------------------------------------
+        # Guardrail blocked
+        #
+        # Every execution path must terminate.
+        # ---------------------------------------------
 
-        # -------------------------------------------------
-        # Simulate recovery result
-        # -------------------------------------------------
+        if not decision.allowed:
+
+            attempt.actual_revenue = Decimal(
+                "0"
+            )
+
+            if (
+                attempt.status
+                != RecoveryStatus.EXECUTING
+            ):
+
+                try:
+
+                    transition_recovery(
+                        attempt,
+                        RecoveryStatus.EXECUTING,
+                        actor="recovery_executor",
+                    )
+
+                except InvalidRecoveryTransition as exc:
+
+                    raise RuntimeError(
+                        "Unable to transition blocked "
+                        "recovery attempt into EXECUTING."
+                    ) from exc
+
+            try:
+
+                transition_recovery(
+                    attempt,
+                    RecoveryStatus.FAILED,
+                    actor="recovery_executor",
+                )
+
+            except InvalidRecoveryTransition as exc:
+
+                raise RuntimeError(
+                    "Unable to terminate blocked "
+                    "recovery attempt as FAILED."
+                ) from exc
+
+            return attempt
+
+        # ---------------------------------------------
+        # Transition into EXECUTING
+        # ---------------------------------------------
+
+        if (
+            attempt.status
+            != RecoveryStatus.EXECUTING
+        ):
+
+            try:
+
+                transition_recovery(
+                    attempt,
+                    RecoveryStatus.EXECUTING,
+                    actor="recovery_executor",
+                )
+
+            except InvalidRecoveryTransition as exc:
+
+                raise RuntimeError(
+                    "Unable to transition recovery "
+                    "attempt into EXECUTING."
+                ) from exc
+
+        # ---------------------------------------------
+        # Simulate recovery outcome
+        # ---------------------------------------------
+
+        probability = (
+            attempt.predicted_probability
+        )
 
         success = (
             rng.random()
-            < attempt.predicted_probability
+            < probability
         )
 
-        # -------------------------------------------------
-        # Recovery succeeded
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # Successful recovery
+        # ---------------------------------------------
 
         if success:
 
-            transition_recovery(
-                attempt,
-                RecoveryStatus.SUCCEEDED,
-            )
+            try:
+
+                transition_recovery(
+                    attempt,
+                    RecoveryStatus.SUCCEEDED,
+                    actor="recovery_executor",
+                )
+
+            except InvalidRecoveryTransition as exc:
+
+                raise RuntimeError(
+                    "Unable to transition recovery "
+                    "attempt to SUCCEEDED."
+                ) from exc
 
             attempt.actual_revenue = (
                 payment.amount
             )
 
-            recovery_event_service.record_event(
-                payment_id=payment.payment_id,
-                event_type="recovery.succeeded",
-                status=RecoveryStatus.SUCCEEDED,
-                strategy=attempt.strategy,
-                details=(
-                    "Recovery attempt completed "
-                    "successfully."
-                ),
-                metadata={
-                    "recovery_id": str(
-                        attempt.recovery_id
-                    ),
-                    "actual_revenue": str(
-                        attempt.actual_revenue
-                    ),
-                },
-            )
+            return attempt
 
-        # -------------------------------------------------
-        # Recovery failed
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # Failed recovery
+        # ---------------------------------------------
 
-        else:
+        try:
 
             transition_recovery(
                 attempt,
                 RecoveryStatus.FAILED,
+                actor="recovery_executor",
             )
 
-            attempt.actual_revenue = Decimal("0")
+        except InvalidRecoveryTransition as exc:
 
-            recovery_event_service.record_event(
-                payment_id=payment.payment_id,
-                event_type="recovery.failed",
-                status=RecoveryStatus.FAILED,
-                strategy=attempt.strategy,
-                details=(
-                    "Recovery attempt completed "
-                    "without recovering payment revenue."
-                ),
-                metadata={
-                    "recovery_id": str(
-                        attempt.recovery_id
-                    ),
-                    "actual_revenue": "0",
-                },
-            )
+            raise RuntimeError(
+                "Unable to transition recovery "
+                "attempt to FAILED."
+            ) from exc
+
+        attempt.actual_revenue = Decimal(
+            "0"
+        )
 
         return attempt

@@ -64,32 +64,47 @@ ALLOWED_RECOVERY_TRANSITIONS: dict[
     RecoveryStatus,
     set[RecoveryStatus],
 ] = {
+    # A recovery decision has been created.
     RecoveryStatus.PROPOSED: {
         RecoveryStatus.APPROVED,
+        RecoveryStatus.SCHEDULED,
         RecoveryStatus.EXECUTING,
         RecoveryStatus.REJECTED,
+        RecoveryStatus.CANCELLED,
     },
 
+    # Approved recoveries can be scheduled or executed.
     RecoveryStatus.APPROVED: {
+        RecoveryStatus.SCHEDULED,
         RecoveryStatus.EXECUTING,
+        RecoveryStatus.REJECTED,
+        RecoveryStatus.CANCELLED,
+    },
+
+    # Scheduled recoveries wait for execution.
+    RecoveryStatus.SCHEDULED: {
+        RecoveryStatus.EXECUTING,
+        RecoveryStatus.CANCELLED,
         RecoveryStatus.REJECTED,
     },
 
+    # Recovery is actively being attempted.
     RecoveryStatus.EXECUTING: {
         RecoveryStatus.SUCCEEDED,
         RecoveryStatus.FAILED,
+        RecoveryStatus.CANCELLED,
     },
 
+    # Terminal states.
     RecoveryStatus.SUCCEEDED: set(),
-
     RecoveryStatus.FAILED: set(),
-
     RecoveryStatus.REJECTED: set(),
+    RecoveryStatus.CANCELLED: set(),
 }
 
 
 # =========================================================
-# Helpers
+# Normalization Helpers
 # =========================================================
 
 def _normalize_payment_status(
@@ -104,7 +119,7 @@ def _normalize_payment_status(
 
     try:
         return PaymentStatus(status)
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         raise InvalidPaymentTransition(
             f"Unknown payment status: {status}"
         ) from exc
@@ -122,7 +137,7 @@ def _normalize_recovery_status(
 
     try:
         return RecoveryStatus(status)
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         raise InvalidRecoveryTransition(
             f"Unknown recovery status: {status}"
         ) from exc
@@ -205,9 +220,8 @@ def transition_recovery(
     """
     Transition a recovery attempt to a new valid status.
 
-    The actor defaults to "system" so simulator and automated
-    recovery workflows can execute transitions without explicitly
-    providing an actor.
+    Supports decision, approval, scheduling and execution
+    stages of the recovery lifecycle.
 
     Raises:
         InvalidRecoveryTransition:

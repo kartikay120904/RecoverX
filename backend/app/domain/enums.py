@@ -1,6 +1,10 @@
 from enum import Enum
 
 
+# =========================================================
+# Payment Enums
+# =========================================================
+
 class PaymentStatus(str, Enum):
     CREATED = "created"
     AUTHORIZED = "authorized"
@@ -9,13 +13,14 @@ class PaymentStatus(str, Enum):
     RETRY_ELIGIBLE = "retry_eligible"
     RETRYING = "retrying"
     REFUNDED = "refunded"
-
+    SUCCEEDED = "succeeded"
 
 class PaymentMethod(str, Enum):
     UPI = "upi"
     CARD = "card"
     NETBANKING = "netbanking"
     WALLET = "wallet"
+
 
 class PaymentFailureCode(str, Enum):
     INSUFFICIENT_FUNDS = "insufficient_funds"
@@ -26,12 +31,20 @@ class PaymentFailureCode(str, Enum):
     GATEWAY_TIMEOUT = "gateway_timeout"
 
 
+# =========================================================
+# Order Enums
+# =========================================================
+
 class OrderStatus(str, Enum):
     CREATED = "created"
     PAID = "paid"
     FAILED = "failed"
     REFUNDED = "refunded"
 
+
+# =========================================================
+# Recovery Decision Enums
+# =========================================================
 
 class RecoveryStrategy(str, Enum):
     RETRY_PAYMENT = "retry_payment"
@@ -42,10 +55,37 @@ class RecoveryStrategy(str, Enum):
     NO_ACTION = "no_action"
 
 
+# =========================================================
+# Recovery Lifecycle Enums
+# =========================================================
+
 class RecoveryStatus(str, Enum):
+    """
+    Complete recovery lifecycle.
+
+    This enum intentionally supports both:
+    - recovery decision / approval workflows
+    - scheduled recovery execution workflows
+    """
+
+    # Initial decision state
     PROPOSED = "proposed"
+
+    # Decision workflow
     APPROVED = "approved"
-    EXECUTING = "executing"
     REJECTED = "rejected"
+
+    # Scheduling workflow
+    SCHEDULED = "scheduled"
+
+    # Execution workflow
+    EXECUTING = "executing"
+
+    # Successful terminal state
     SUCCEEDED = "succeeded"
+
+    # Failed terminal state
     FAILED = "failed"
+
+    # Manually or automatically cancelled
+    CANCELLED = "cancelled"

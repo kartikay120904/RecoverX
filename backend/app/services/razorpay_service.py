@@ -255,7 +255,46 @@ class RazorpayService:
 
 
 # =========================================================
-# Singleton service instance
+# Lazy service proxy
 # =========================================================
 
-razorpay_service = RazorpayService()
+class LazyRazorpayService:
+    """
+    Lazily creates RazorpayService only when a real
+    Razorpay operation is requested.
+
+    This allows the FastAPI application and unit tests
+    to import successfully without Razorpay credentials.
+    """
+
+    def __init__(self) -> None:
+        self._service: RazorpayService | None = None
+
+    def _get_service(self) -> RazorpayService:
+        """
+        Create and cache the real service on first use.
+        """
+
+        if self._service is None:
+            self._service = RazorpayService()
+
+        return self._service
+
+    def __getattr__(
+        self,
+        name: str,
+    ):
+        """
+        Delegate method and attribute access to the
+        lazily initialized Razorpay service.
+        """
+
+        service = self._get_service()
+
+        return getattr(
+            service,
+            name,
+        )
+
+
+razorpay_service = LazyRazorpayService()

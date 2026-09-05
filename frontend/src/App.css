@@ -914,3 +914,112 @@ button {
   border-radius: 8px;
   color: #ff8080;
 }
+
+.backend-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  padding: 8px 12px;
+
+  border-radius: 999px;
+
+  font-size: 13px;
+  font-weight: 600;
+
+  border: 1px solid var(--border);
+}
+
+.backend-status-dot {
+  width: 8px;
+  height: 8px;
+
+  border-radius: 50%;
+
+  background: #f59e0b;
+}
+
+.backend-status.connected {
+  color: #15803d;
+}
+
+.backend-status.connected .backend-status-dot {
+  background: #22c55e;
+}
+
+.backend-status.offline {
+  color: #dc2626;
+}
+
+.backend-status.offline .backend-status-dot {
+  background: #ef4444;
+}
+
+.backend-status.checking {
+  color: #a16207;
+}
+
+.backend-status.checking .backend-status-dot {
+  background: #f59e0b;
+  animation: statusPulse 1.5s infinite;
+}
+
+@keyframes statusPulse {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+
+  50% {
+    transform: scale(1.4);
+    opacity: 0.5;
+  }
+
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.empty-state {
+  min-height: 180px;
+
+  display: flex;
+  flex-direction: column;
+
+  align-items: center;
+  justify-content: center;
+
+  text-align: center;
+
+  color: #64748b;
+}
+
+.empty-state-icon {
+  width: 42px;
+  height: 42px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  margin-bottom: 12px;
+
+  border-radius: 50%;
+
+  background: #f1f5f9;
+
+  font-size: 24px;
+}
+
+.empty-state strong {
+  color: #1e293b;
+}
+
+.empty-state p {
+  max-width: 300px;
+
+  margin-top: 6px;
+
+  font-size: 14px;
+}

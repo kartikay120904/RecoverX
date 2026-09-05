@@ -1,7 +1,10 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
-from backend.app.domain.enums import PaymentFailureCode, RecoveryStrategy
+from backend.app.domain.enums import (
+    PaymentFailureCode,
+    RecoveryStrategy,
+)
 from backend.app.domain.models import Payment
 from simulator.analytics.incident_analysis import IncidentAnalysis
 
@@ -19,22 +22,40 @@ def _strategy_for_failure(
     payment: Payment,
     incident: IncidentAnalysis,
 ) -> RecoveryStrategy:
-    if payment.failure_code == PaymentFailureCode.BANK_TIMEOUT.value:
+    if (
+        payment.failure_code
+        == PaymentFailureCode.BANK_TIMEOUT.value
+    ):
         return RecoveryStrategy.RETRY_PAYMENT
 
-    if payment.failure_code == PaymentFailureCode.NETWORK_ERROR.value:
+    if (
+        payment.failure_code
+        == PaymentFailureCode.NETWORK_ERROR.value
+    ):
         return RecoveryStrategy.RETRY_PAYMENT
 
-    if payment.failure_code == PaymentFailureCode.GATEWAY_TIMEOUT.value:
+    if (
+        payment.failure_code
+        == PaymentFailureCode.GATEWAY_TIMEOUT.value
+    ):
         return RecoveryStrategy.RETRY_PAYMENT
 
-    if payment.failure_code == PaymentFailureCode.AUTHENTICATION_FAILED.value:
+    if (
+        payment.failure_code
+        == PaymentFailureCode.AUTHENTICATION_FAILED.value
+    ):
         return RecoveryStrategy.SEND_REMINDER
 
-    if payment.failure_code == PaymentFailureCode.INSUFFICIENT_FUNDS.value:
+    if (
+        payment.failure_code
+        == PaymentFailureCode.INSUFFICIENT_FUNDS.value
+    ):
         return RecoveryStrategy.SEND_REMINDER
 
-    if payment.failure_code == PaymentFailureCode.PAYMENT_DECLINED.value:
+    if (
+        payment.failure_code
+        == PaymentFailureCode.PAYMENT_DECLINED.value
+    ):
         return RecoveryStrategy.RECOVERY_LINK
 
     if incident.severity == "critical":
@@ -67,10 +88,13 @@ def recommend_recovery(
         incident,
     )
 
-    probability = _probability_for_strategy(strategy)
+    probability = _probability_for_strategy(
+        strategy,
+    )
 
     predicted_revenue = (
-        payment.amount * Decimal(str(probability))
+        payment.amount
+        * Decimal(str(probability))
     )
 
     reason = (

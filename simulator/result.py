@@ -1,25 +1,29 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-from backend.app.domain.events import DomainEvent
-from backend.app.domain.models import (
-    Customer,
-    Merchant,
-    Order,
-    Payment,
-    RecoveryAttempt,
-)
-
-if TYPE_CHECKING:
-    from simulator.analytics.report import SimulationReport
+from typing import Any
 
 
-@dataclass(frozen=True)
+@dataclass
 class SimulationResult:
-    merchants: list[Merchant]
-    customers: list[Customer]
-    orders: list[Order]
-    payments: list[Payment]
-    events: list[DomainEvent]
-    recovery_attempts: list[RecoveryAttempt]
-    report: "SimulationReport | None" = None
+    """
+    Complete output of a simulation run.
+
+    Contains generated entities, payment lifecycle
+    events, recovery attempts, metrics, and
+    batch-level incident analysis.
+    """
+
+    merchants: list[Any]
+
+    customers: list[Any]
+
+    orders: list[Any]
+
+    payments: list[Any]
+
+    events: list[Any]
+
+    recovery_attempts: list[Any]
+
+    report: Any
+
+    incident_analysis: Any | None = None

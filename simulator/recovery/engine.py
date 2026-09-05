@@ -19,9 +19,6 @@ class RecoveryEngine:
     selects the most appropriate recovery strategy,
     calculates an explainable decision score,
     and estimates expected recovered revenue.
-
-    The original probability contract is intentionally preserved
-    for backwards compatibility with the existing test suite.
     """
 
     BASE_PROBABILITIES = {
@@ -33,6 +30,18 @@ class RecoveryEngine:
         RecoveryStrategy.NO_ACTION: 0.0,
     }
 
+    def is_recoverable(
+        self,
+        payment: Payment,
+    ) -> bool:
+        """
+        Determine whether a payment is eligible for recovery.
+        """
+
+        return (
+            payment.status == PaymentStatus.FAILED
+            and payment.failure_code is not None
+        )
     def propose(
         self,
         payment: Payment,
@@ -43,7 +52,7 @@ class RecoveryEngine:
         Returns None when the payment is not recoverable.
         """
 
-        if payment.status != PaymentStatus.FAILED:
+        if not self.is_recoverable(payment):
             return None
 
         strategy = self._select_strategy(payment)
@@ -90,6 +99,14 @@ class RecoveryEngine:
         self,
         payment: Payment,
     ) -> RecoveryStrategy:
+        """
+        Select the most appropriate recovery strategy.
+        """
+
+        # Too many attempts should not continue automatic retries.
+        if payment.attempt_number >= 4:
+            return RecoveryStrategy.ESCALATE
+
         failure_code = payment.failure_code
 
         if failure_code in {
@@ -116,10 +133,7 @@ class RecoveryEngine:
         strategy: RecoveryStrategy,
     ) -> float:
         """
-        Preserve the existing baseline probability model.
-
-        Context-aware scoring is handled separately so the original
-        recovery probability API remains backwards compatible.
+        Return the baseline recovery probability.
         """
 
         return self.BASE_PROBABILITIES[strategy]
@@ -132,12 +146,6 @@ class RecoveryEngine:
     ) -> float:
         """
         Calculate an explainable decision confidence score.
-
-        Factors:
-        - baseline recovery probability
-        - retry history
-        - payment method
-        - failure type
         """
 
         score = probability
@@ -149,7 +157,8 @@ class RecoveryEngine:
                 0.15,
             )
 
-        # UPI/card are generally strong candidates for automated recovery.
+        # UPI and card payments are stronger candidates
+        # for automated recovery.
         if payment.method in {
             PaymentMethod.UPI,
             PaymentMethod.CARD,
@@ -157,7 +166,7 @@ class RecoveryEngine:
             score += 0.03
 
         # Transient infrastructure failures are particularly
-        # suitable for retry.
+        # suitable for automated retry.
         if (
             strategy == RecoveryStrategy.RETRY_PAYMENT
             and payment.failure_code
@@ -168,6 +177,10 @@ class RecoveryEngine:
             }
         ):
             score += 0.05
+
+        # Escalation should have lower automation confidence.
+        if strategy == RecoveryStrategy.ESCALATE:
+            score = min(score, 0.25)
 
         return round(
             max(0.0, min(1.0, score)),
@@ -180,6 +193,10 @@ class RecoveryEngine:
         strategy: RecoveryStrategy,
         probability: float,
     ) -> str:
+        """
+        Build a human-readable explanation for the decision.
+        """
+
         failure_code = payment.failure_code or "unknown"
 
         if strategy == RecoveryStrategy.RETRY_PAYMENT:
@@ -208,8 +225,8 @@ class RecoveryEngine:
 
         elif strategy == RecoveryStrategy.ESCALATE:
             explanation = (
-                "The payment requires operational intervention "
-                "rather than automated recovery."
+                "Multiple recovery attempts have already been made, "
+                "so the payment should be escalated instead of retried."
             )
 
         else:

@@ -67,7 +67,7 @@ def build_simulation_report(
     )
     incident = analyze_incident(
         payments,
-        orders,
+        
     )
 
     recommendations = recommend_recoveries(

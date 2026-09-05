@@ -14,6 +14,9 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from backend.app.api.razorpay_webhook import (
+    router as razorpay_webhook_router,
+)
 
 from backend.app.api.recovery import router as recovery_router
 from backend.app.services.razorpay_service import razorpay_service
@@ -63,6 +66,14 @@ app.include_router(recovery_router)
 
 
 # =========================================================
+# Razorpay Webhook API
+# =========================================================
+
+app.include_router(
+    razorpay_webhook_router
+)
+
+# =========================================================
 # Health
 # =========================================================
 
@@ -89,7 +100,9 @@ class SimulationRequest(BaseModel):
 
 
 @app.post("/simulation/run")
-def simulation_run(request: SimulationRequest) -> dict[str, Any]:
+def simulation_run(
+    request: SimulationRequest | None = None,
+) -> dict[str, Any]:
     """
     Run a deterministic RecoverX payment simulation.
     """
@@ -122,7 +135,9 @@ def simulation_run(request: SimulationRequest) -> dict[str, Any]:
 # =========================================================
 
 @app.post("/analytics/report")
-def analytics_report(request: SimulationRequest) -> dict[str, Any]:
+def analytics_report(
+    request: SimulationRequest | None = None,
+) -> dict[str, Any]:
     config = SimulationRunConfig(
         seed=request.seed,
         merchant_count=request.merchant_count,

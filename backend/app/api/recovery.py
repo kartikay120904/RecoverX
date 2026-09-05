@@ -9,8 +9,11 @@ from uuid import UUID, uuid4
 from datetime import datetime, timezone
 import hashlib
 import json
-
-from fastapi import APIRouter, HTTPException
+from simulator.recovery.scheduler import RecoveryScheduler
+from simulator.recovery.executor import RecoveryExecutor
+from simulator.recovery.scheduler import RecoveryScheduler
+from simulator.recovery.worker import RecoveryWorker
+from simulator.recovery.guardrails import RecoveryGuardrails
 
 from backend.app.domain.enums import (
     RecoveryStatus,
@@ -33,6 +36,31 @@ from simulator.analytics.counterfactual import (
 )
 from simulator.analytics.incident_analysis import (
     IncidentAnalysis,
+)
+from simulator.analytics.recovery_metrics import (
+    RecoveryPerformanceTracker,
+)
+from simulator.recovery.diagnosis import (
+    FailureDiagnosis,
+    PaymentFailureDiagnoser,
+)
+from simulator.recovery.diagnosis import (
+    PaymentFailureDiagnoser,
+)
+
+from simulator.recovery.strategy import (
+    RecoveryStrategyEngine,
+)
+
+from simulator.recovery.guardrails import (
+    RecoveryGuardrails,
+)
+from simulator.recovery.scheduler import (
+    RecoverySchedule,
+    RecoveryScheduler,
+)
+from simulator.recovery.worker import (
+    RecoveryWorker,
 )
 from simulator.recovery.engine import RecoveryEngine
 from simulator.recovery.executor import RecoveryExecutor
@@ -78,6 +106,47 @@ idempotency_store: dict[str, dict] = {}
 event_store: dict[UUID, list[RecoveryEvent]] = {}
 
 # =========================================================
+# Recovery execution audit store
+# =========================================================
+
+recovery_execution_audit_store: list[dict] = []
+
+# =========================================================
+# Recovery webhook store
+# =========================================================
+
+recovery_webhook_store: list[dict[str, Any]] = []
+
+scheduled_recovery_store: dict[
+    UUID,
+    RecoverySchedule,
+] = {}
+
+def record_recovery_webhook(
+    payment_id: UUID,
+    event_type: str,
+    recovery_id: UUID | None = None,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+
+    webhook_event = {
+        "payment_id": str(payment_id),
+        "recovery_id": (
+            str(recovery_id)
+            if recovery_id is not None
+            else None
+        ),
+        "event_type": event_type,
+        "data": data or {},
+    }
+
+    recovery_webhook_store.append(
+        webhook_event
+    )
+
+    return webhook_event
+
+# =========================================================
 # Recovery services
 # =========================================================
 
@@ -86,6 +155,37 @@ engine = RecoveryEngine()
 executor = RecoveryExecutor()
 
 random_generator = Random(42)
+
+diagnoser = PaymentFailureDiagnoser()
+
+# =========================================================
+# Recovery services
+# =========================================================
+
+diagnoser = PaymentFailureDiagnoser()
+
+strategy_engine = RecoveryStrategyEngine()
+
+guardrails = RecoveryGuardrails()
+
+executor = RecoveryExecutor(
+    guardrails=guardrails,
+)
+
+recovery_scheduler = RecoveryScheduler()
+
+recovery_worker = RecoveryWorker(
+    scheduler=recovery_scheduler,
+    executor=executor,
+)
+
+recovery_scheduler = RecoveryScheduler()
+# =========================================================
+# Recovery execution stores
+# =========================================================
+
+recovery_execution_store: dict[str, dict] = {}
+
 
 class RecoveryExecutionRequest(BaseModel):
     payment_id: UUID
@@ -100,6 +200,13 @@ class RecoveryExecutionResponse(BaseModel):
     status: str
     idempotency_key: str
     created_at: datetime
+    
+recovery_execution_history_store: dict[
+    UUID,
+    RecoveryExecutionResponse,
+] = {}
+
+
 def _build_idempotency_fingerprint(
     payment_id: UUID,
     action: str,
@@ -431,6 +538,9 @@ def _load_recovery_data() -> None:
     merchants_store.clear()
     idempotency_store.clear()
     event_store.clear()
+    scheduled_recovery_store.clear()
+    recovery_execution_store.clear()
+    recovery_execution_history_store.clear()
 
     result = run_simulation(
         SimulationRunConfig(
@@ -1568,30 +1678,6 @@ def run_batch_simulation(
                 f"{str(exc)}"
             ),
         )
-    
-# =========================================================
-# GET /recovery/recommendations
-# =========================================================
-
-@router.get(
-    "/recommendations"
-)
-def get_recommendations():
-
-    _load_recovery_data()
-
-    return [
-        attempt.model_dump(
-            mode="json"
-        )
-        for attempt
-        in recovery_store.values()
-        if (
-            attempt.status
-            == RecoveryStatus.PROPOSED
-        )
-    ]
-
 
 # =========================================================
 # GET /recovery/payments
@@ -1823,6 +1909,29 @@ def get_payments(
             "failure_code": failure_code,
         },
     }
+    
+# =========================================================
+# GET /recovery/recommendations
+# =========================================================
+
+@router.get(
+    "/recommendations"
+)
+def get_recommendations():
+
+    _load_recovery_data()
+
+    return [
+        attempt.model_dump(
+            mode="json"
+        )
+        for attempt
+        in recovery_store.values()
+        if (
+            attempt.status
+            == RecoveryStatus.PROPOSED
+        )
+    ]
 
 
 # =========================================================
@@ -2472,6 +2581,136 @@ def get_recovery_events(
         ],
     }
 
+# =========================================================
+# GET /recovery/{payment_id}/timeline
+# =========================================================
+
+@router.get(
+    "/{payment_id}/timeline",
+)
+def get_recovery_timeline(
+    payment_id: UUID,
+):
+    """
+    Return a simplified chronological timeline
+    for a payment recovery lifecycle.
+    """
+
+    _load_recovery_data()
+
+    payment = payments_store.get(
+        payment_id
+    )
+
+    if payment is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Payment not found",
+        )
+
+    events = event_store.get(
+        payment_id,
+        [],
+    )
+
+    events = sorted(
+        events,
+        key=lambda event: (
+            getattr(
+                event,
+                "created_at",
+                None,
+            )
+            or getattr(
+                event,
+                "timestamp",
+                None,
+            )
+            or ""
+        ),
+    )
+
+    recovery = recovery_store.get(
+        payment_id
+    )
+
+    timeline = []
+
+    for event in events:
+
+        event_data = event.model_dump(
+            mode="json",
+        )
+
+        metadata = (
+            event_data.get(
+                "metadata",
+                {},
+            )
+            or {}
+        )
+
+        timeline.append(
+            {
+                "event_type": event_data.get(
+                    "event_type",
+                ),
+                "status": event_data.get(
+                    "status",
+                ),
+                "timestamp": (
+                    event_data.get(
+                        "created_at",
+                    )
+                    or event_data.get(
+                        "timestamp",
+                    )
+                ),
+                "actor": metadata.get(
+                    "actor",
+                ),
+                "strategy": metadata.get(
+                    "strategy",
+                ),
+                "details": metadata.get(
+                    "details",
+                ),
+            }
+        )
+
+    recovery_id = None
+    current_status = None
+
+    if recovery is not None:
+
+        recovery_id = str(
+            recovery.recovery_id
+        )
+
+        current_status = (
+            recovery.status.value
+            if hasattr(
+                recovery.status,
+                "value",
+            )
+            else str(
+                recovery.status
+            )
+        )
+
+    return {
+        "payment_id": str(
+            payment_id
+        ),
+        "recovery_id": recovery_id,
+        "current_status": current_status,
+        "total_events": len(
+            timeline
+        ),
+        "timeline": timeline,
+    }
+
 
 # =========================================================
 # GET /recovery/priority-queue
@@ -2683,6 +2922,370 @@ def get_recovery_priority_queue(
     }
 
 # =========================================================
+# GET /recovery/{payment_id}/intelligence
+# =========================================================
+
+@router.get(
+    "/{payment_id}/intelligence",
+)
+def get_recovery_intelligence(
+    payment_id: UUID,
+):
+    """
+    Run the complete recovery intelligence pipeline.
+
+    Pipeline:
+
+    Payment
+        ->
+    Failure Diagnosis
+        ->
+    Strategy Decision
+        ->
+    Guardrail Evaluation
+    """
+
+    _load_recovery_data()
+
+    # -------------------------------------------------
+    # Payment lookup
+    # -------------------------------------------------
+
+    payment = payments_store.get(
+        payment_id,
+    )
+
+    if payment is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Payment not found",
+        )
+
+    # -------------------------------------------------
+    # Payment must be failed
+    # -------------------------------------------------
+
+    if (
+        payment.status
+        != PaymentStatus.FAILED
+    ):
+
+        return {
+            "payment_id": str(
+                payment.payment_id
+            ),
+            "diagnosis": None,
+            "decision": {
+                "strategy": (
+                    RecoveryStrategy.NO_ACTION.value
+                ),
+                "score": 1.0,
+                "reason": (
+                    "Payment is not in a failed state."
+                ),
+            },
+            "guardrails": {
+                "allowed": False,
+                "action": "stop",
+                "reason": (
+                    "Recovery is only required "
+                    "for failed payments."
+                ),
+                "should_escalate": False,
+                "cooldown_required": False,
+                "should_stop": True,
+            },
+        }
+
+    # -------------------------------------------------
+    # Recovery attempt lookup
+    # -------------------------------------------------
+
+    attempt = recovery_store.get(
+        payment_id,
+    )
+
+    if attempt is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Recovery attempt not found "
+                "for this payment."
+            ),
+        )
+
+    # -------------------------------------------------
+    # Step 1: Diagnose failure
+    # -------------------------------------------------
+
+    diagnosis = diagnoser.diagnose(
+        payment,
+    )
+
+    # -------------------------------------------------
+    # Step 2: Select strategy
+    # -------------------------------------------------
+
+    decision = strategy_engine.decide(
+        payment,
+        diagnosis,
+    )
+
+    # -------------------------------------------------
+    # Step 3: Apply guardrails
+    # -------------------------------------------------
+
+    # Use the strategy selected by the
+    # intelligence engine for evaluation.
+
+    original_strategy = (
+        attempt.strategy
+    )
+
+    try:
+
+        attempt.strategy = (
+            decision.strategy
+        )
+
+        guardrail_decision = (
+            guardrails.evaluate(
+                payment,
+                attempt,
+            )
+        )
+
+    finally:
+
+        # Restore the stored attempt so this
+        # endpoint does not mutate application state.
+
+        attempt.strategy = (
+            original_strategy
+        )
+
+    # -------------------------------------------------
+    # Build alternatives
+    # -------------------------------------------------
+
+    alternatives = []
+
+    for alternative in (
+        decision.alternatives
+    ):
+
+        alternatives.append(
+            {
+                "strategy": (
+                    alternative.strategy.value
+                ),
+                "score": (
+                    alternative.score
+                ),
+                "reason": (
+                    alternative.reason
+                ),
+            }
+        )
+
+    # -------------------------------------------------
+    # Final response
+    # -------------------------------------------------
+
+    return {
+
+        "payment_id": str(
+            payment.payment_id
+        ),
+
+        "diagnosis": {
+
+            "category": (
+                diagnosis.category
+            ),
+
+            "root_cause": (
+                diagnosis.root_cause
+            ),
+
+            "recommended_strategy": (
+                diagnosis
+                .recommended_strategy
+                .value
+            ),
+
+            "confidence": (
+                diagnosis.confidence
+            ),
+        },
+
+        "decision": {
+
+            "strategy": (
+                decision.strategy.value
+            ),
+
+            "score": (
+                decision.score
+            ),
+
+            "reason": (
+                decision.reason
+            ),
+
+            "alternatives": (
+                alternatives
+            ),
+        },
+
+        "guardrails": {
+
+            "allowed": (
+                guardrail_decision.allowed
+            ),
+
+            "action": (
+                guardrail_decision.action
+            ),
+
+            "reason": (
+                guardrail_decision.reason
+            ),
+
+            "should_escalate": (
+                guardrail_decision
+                .should_escalate
+            ),
+
+            "cooldown_required": (
+                guardrail_decision
+                .cooldown_required
+            ),
+
+            "should_stop": (
+                guardrail_decision
+                .should_stop
+            ),
+        },
+    }
+
+# =========================================================
+# GET /recovery/webhooks
+# =========================================================
+
+@router.get(
+    "/webhooks",
+)
+def get_recovery_webhooks():
+    """
+    Return recorded recovery webhook events.
+    """
+
+    return {
+        "total": len(
+            recovery_webhook_store
+        ),
+        "webhooks": list(
+            recovery_webhook_store
+        ),
+    }
+
+# =========================================================
+# POST /recovery/process-due
+# =========================================================
+
+@router.post(
+    "/process-due"
+)
+def process_due_recoveries():
+    """
+    Process every recovery attempt whose
+    scheduled execution time has been reached.
+    """
+
+    _load_recovery_data()
+
+    def on_executed(
+        payment,
+        attempt,
+    ):
+
+        recovery_store[
+            payment.payment_id
+        ] = attempt
+
+        record_event(
+            payment_id=payment.payment_id,
+            recovery_id=attempt.recovery_id,
+            event_type="recovery_executed",
+            metadata={
+                "strategy": (
+                    attempt.strategy.value
+                ),
+                "status": (
+                    attempt.status.value
+                ),
+                "actual_revenue": str(
+                    attempt.actual_revenue
+                    or 0
+                ),
+            },
+        )
+
+        record_recovery_webhook(
+            payment_id=payment.payment_id,
+            recovery_id=attempt.recovery_id,
+            event_type=(
+                "recovery_execution_completed"
+            ),
+            data={
+                "strategy": (
+                    attempt.strategy.value
+                ),
+                "status": (
+                    attempt.status.value
+                ),
+                "actual_revenue": str(
+                    attempt.actual_revenue
+                    or 0
+                ),
+            },
+        )
+
+    result = recovery_worker.process_due(
+        schedules=scheduled_recovery_store,
+        payments=payments_store,
+        attempts=recovery_store,
+        rng=random_generator,
+        on_executed=on_executed,
+    )
+
+    return {
+        "scanned": result.scanned,
+        "due": result.due,
+        "executed": result.executed,
+        "skipped": result.skipped,
+        "remaining_scheduled": len(
+            scheduled_recovery_store
+        ),
+    }
+
+# =========================================================
+# GET /recovery/executions
+# Recovery execution audit history
+# =========================================================
+
+@router.get("/executions")
+def get_recovery_execution_history():
+    """
+    Return the audit history of all recovery executions.
+    """
+
+    return recovery_execution_audit_store
+
+# =========================================================
 # GET /recovery/{payment_id}
 # =========================================================
 
@@ -2713,6 +3316,122 @@ def get_recovery(
         mode="json"
     )
 
+# =========================================================
+# GET /recovery/{payment_id}/diagnosis
+# =========================================================
+
+@router.get(
+    "/{payment_id}/diagnosis",
+)
+def get_payment_diagnosis(
+    payment_id: UUID,
+):
+    """
+    Diagnose the root cause of a failed payment and return
+    the recommended recovery strategy.
+    """
+
+    _load_recovery_data()
+
+    # -----------------------------------------------------
+    # Payment lookup
+    # -----------------------------------------------------
+
+    payment = payments_store.get(
+        payment_id
+    )
+
+    if payment is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Payment not found",
+        )
+
+    # -----------------------------------------------------
+    # Successful payment
+    # -----------------------------------------------------
+
+    payment_status = (
+        payment.status.value
+        if hasattr(
+            payment.status,
+            "value",
+        )
+        else str(
+            payment.status
+        )
+    )
+
+    if payment_status.lower() != "failed":
+
+        return {
+            "payment_id": str(
+                payment.payment_id
+            ),
+            "diagnosis": {
+                "category": "payment_not_failed",
+                "root_cause": (
+                    "The payment is not currently "
+                    "in a failed state."
+                ),
+                "recommended_strategy": (
+                    RecoveryStrategy.NO_ACTION.value
+                ),
+                "confidence": 1.0,
+            },
+            "recovery_allowed": False,
+            "final_recommended_strategy": (
+                RecoveryStrategy.NO_ACTION.value
+            ),
+        }
+
+    # -----------------------------------------------------
+    # Run diagnosis
+    # -----------------------------------------------------
+
+    diagnosis = diagnoser.diagnose(
+        payment
+    )
+
+    recommended_strategy = (
+        diagnosis.recommended_strategy.value
+        if hasattr(
+            diagnosis.recommended_strategy,
+            "value",
+        )
+        else str(
+            diagnosis.recommended_strategy
+        )
+    )
+
+    # -----------------------------------------------------
+    # Build response
+    # -----------------------------------------------------
+
+    return {
+        "payment_id": str(
+            payment.payment_id
+        ),
+        "diagnosis": {
+            "category": diagnosis.category,
+            "root_cause": diagnosis.root_cause,
+            "recommended_strategy": (
+                recommended_strategy
+            ),
+            "confidence": round(
+                diagnosis.confidence,
+                4,
+            ),
+        },
+        "recovery_allowed": (
+            recommended_strategy
+            != RecoveryStrategy.NO_ACTION.value
+        ),
+        "final_recommended_strategy": (
+            recommended_strategy
+        ),
+    }
 
 # =========================================================
 # POST /recovery/{payment_id}/approve
@@ -2822,6 +3541,31 @@ def approve_recovery(payment_id: UUID):
                 exc
             ),
         ) from exc
+    # -------------------------------------------------
+    # Schedule approved recovery
+#    -------------------------------------------------
+
+    schedule = recovery_scheduler.schedule(
+    attempt
+    )
+
+    scheduled_recovery_store[
+        payment_id
+    ] = schedule
+
+    record_event(
+    payment_id=payment_id,
+    recovery_id=attempt.recovery_id,
+    event_type="recovery_scheduled",
+    metadata={
+        "strategy": attempt.strategy.value,
+        "scheduled_at": (
+            schedule.scheduled_at.isoformat()
+        ),
+        "reason": schedule.reason,
+    },
+)
+
 
     recovery_store[
         payment_id
@@ -3003,7 +3747,33 @@ def execute_recovery(
                 "before execution."
             ),
         )
+# -------------------------------------------------
+# Check scheduled execution time
+# -------------------------------------------------
 
+    schedule = scheduled_recovery_store.get(
+        payment_id
+    )
+
+    if schedule is not None:
+
+        if not recovery_scheduler.is_due(
+        schedule
+    ):
+
+            raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "Recovery execution is not "
+                    "due yet."
+                ),
+                "scheduled_at": (
+                    schedule.scheduled_at.isoformat()
+                ),
+            },
+        )
+    
     # -------------------------------------------------
     # Execute recovery
     # -------------------------------------------------
@@ -3015,6 +3785,10 @@ def execute_recovery(
             payment=payment,
             rng=random_generator,
         )
+        scheduled_recovery_store.pop(
+    payment_id,
+    None,
+)
 
     except InvalidRecoveryTransition as exc:
 
@@ -3030,6 +3804,37 @@ def execute_recovery(
     recovery_store[
         payment_id
     ] = updated_recovery
+
+    record_recovery_webhook(
+    payment_id=payment_id,
+    recovery_id=updated_recovery.recovery_id,
+    event_type="recovery_execution_completed",
+    data={
+        "status": (
+            updated_recovery.status.value
+            if hasattr(
+                updated_recovery.status,
+                "value",
+            )
+            else str(
+                updated_recovery.status
+            )
+        ),
+        "strategy": (
+            updated_recovery.strategy.value
+            if hasattr(
+                updated_recovery.strategy,
+                "value",
+            )
+            else str(
+                updated_recovery.strategy
+            )
+        ),
+        "actual_revenue": str(
+            updated_recovery.actual_revenue
+        ),
+    },
+)
 
     # -------------------------------------------------
     # Record execution event
@@ -3169,6 +3974,7 @@ def execute_recovery_action(
         created_at=datetime.now(timezone.utc),
     )
 
+    # Store idempotency mapping.
     recovery_execution_store[
         idempotency_key
     ] = {
@@ -3176,4 +3982,131 @@ def execute_recovery_action(
         "response": execution_response,
     }
 
+    # ---------------------------------------------------------
+    # Audit record
+    # ---------------------------------------------------------
+
+    audit_record = {
+    "execution_id": str(execution_response.execution_id),
+    "payment_id": str(request.payment_id),
+    "action": action,
+    "status": execution_response.status,
+    "idempotency_key": idempotency_key,
+    "created_at": execution_response.created_at.isoformat(),
+}
+
+    recovery_execution_audit_store.append(audit_record)
+
+
+    # Store immutable execution history.
+    recovery_execution_history_store[
+        execution_response.execution_id
+    ] = execution_response
+
     return execution_response
+
+
+
+# =========================================================
+# GET /recovery/executions/{execution_id}
+# =========================================================
+
+@router.get(
+    "/executions/{execution_id}",
+    response_model=RecoveryExecutionResponse,
+)
+def get_recovery_execution(
+    execution_id: UUID,
+):
+    """
+    Return one recovery execution record.
+    """
+
+    execution = (
+        recovery_execution_history_store.get(
+            execution_id
+        )
+    )
+
+    if execution is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Recovery execution not found",
+        )
+
+    return execution
+
+# =========================================================
+# GET /recovery/scheduled
+# =========================================================
+
+@router.get(
+    "/scheduled"
+)
+def get_scheduled_recoveries():
+    """
+    Return all recovery attempts that have been
+    scheduled for future execution.
+    """
+
+    scheduled = sorted(
+        scheduled_recovery_store.values(),
+        key=lambda schedule: (
+            schedule.scheduled_at
+        ),
+    )
+
+    return {
+        "total": len(
+            scheduled
+        ),
+        "scheduled": [
+            {
+                "recovery_id": (
+                    schedule.recovery_id
+                ),
+                "payment_id": (
+                    schedule.payment_id
+                ),
+                "strategy": (
+                    schedule.strategy.value
+                ),
+                "scheduled_at": (
+                    schedule.scheduled_at.isoformat()
+                ),
+                "reason": (
+                    schedule.reason
+                ),
+            }
+            for schedule in scheduled
+        ],
+    }
+
+# =========================================================
+# GET /recovery/{payment_id}/executions
+# =========================================================
+
+@router.get(
+    "/{payment_id}/executions",
+    response_model=list[RecoveryExecutionResponse],
+)
+def get_payment_recovery_executions(
+    payment_id: UUID,
+):
+    """
+    Return recovery execution history for a payment.
+    """
+
+    executions = [
+        execution
+        for execution in (
+            recovery_execution_history_store.values()
+        )
+        if execution.payment_id == payment_id
+    ]
+
+    return sorted(
+        executions,
+        key=lambda execution: execution.created_at,
+        reverse=True,
+    )

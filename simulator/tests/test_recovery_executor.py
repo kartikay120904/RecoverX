@@ -100,3 +100,4 @@ def test_execution_is_deterministic_with_same_seed():
 
     assert first.status == second.status
     assert first.actual_revenue == second.actual_revenue
+    

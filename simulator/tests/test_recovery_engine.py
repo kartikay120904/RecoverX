@@ -106,3 +106,41 @@ def test_successful_payment_is_not_recoverable():
     attempt = RecoveryEngine().propose(payment)
 
     assert attempt is None
+
+def test_non_failed_payment_is_not_recoverable():
+    payment = make_failed_payment(
+        PaymentFailureCode.BANK_TIMEOUT.value
+    )
+
+    payment.status = PaymentStatus.CAPTURED
+
+    engine = RecoveryEngine()
+
+    assert engine.is_recoverable(payment) is False
+
+
+def test_payment_without_failure_code_is_not_recoverable():
+    payment = make_failed_payment(
+        PaymentFailureCode.BANK_TIMEOUT.value
+    )
+
+    payment.failure_code = None
+
+    attempt = RecoveryEngine().propose(payment)
+
+    assert attempt is None
+
+def test_excessive_retry_attempts_escalate():
+    payment = make_failed_payment(
+        PaymentFailureCode.BANK_TIMEOUT.value
+    )
+
+    payment.attempt_number = 4
+
+    attempt = RecoveryEngine().propose(payment)
+
+    assert attempt is not None
+    assert attempt.strategy == RecoveryStrategy.ESCALATE
+    assert attempt.status == RecoveryStatus.PROPOSED
+
+    
